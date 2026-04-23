@@ -6,6 +6,7 @@ The app binary now supports terminal commands directly.
 
 ```bash
 VibeWindowManager list-apps
+VibeWindowManager bridge-dump ghostty
 VibeWindowManager cursor cascade --pixel 30
 VibeWindowManager ghostty columns
 VibeWindowManager brave grid
@@ -29,6 +30,10 @@ windows ghostty columns
 windows brave grid
 windows help
 ```
+
+## `bridge-dump <app>`
+
+Prints a single `layout` JSON document (as used by the iOS bridge) to stdout for a running app, e.g. `ghostty`. Same Accessibility rules as other commands. See `docs/PROTOCOL.md` for the wire format.
 
 ## Notes
 

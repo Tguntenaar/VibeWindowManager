@@ -128,11 +128,28 @@ struct WindowLayoutEngineTests {
     }
 }
 
+struct LayoutMirrorServiceTests {
+    @Test func normalizeMatchesPreviewAxis() {
+        let ref = CGRect(x: 100, y: 200, width: 1000, height: 800)
+        let win = CGRect(x: 100, y: 400, width: 500, height: 400)
+        let n = LayoutMirrorService.normalize(frame: win, to: ref)!
+        #expect(abs(n.x - 0) < 0.001)
+        #expect(abs(n.width - 0.5) < 0.001)
+        #expect(abs(n.height - 0.5) < 0.001)
+        #expect(n.y > 0)
+    }
+}
+
 @MainActor
 struct WindowCLITests {
     @Test func parseListApps() throws {
         let command = try WindowCLI.parse(userArguments: ["list-apps"])
         #expect(command == .listApps)
+    }
+
+    @Test func parseBridgeDump() throws {
+        let command = try WindowCLI.parse(userArguments: ["bridge-dump", "ghostty"])
+        #expect(command == .bridgeDump(appQuery: "ghostty"))
     }
 
     @Test func parseHelp() throws {
@@ -148,5 +165,30 @@ struct WindowCLITests {
     @Test func parseColumns() throws {
         let command = try WindowCLI.parse(userArguments: ["ghostty", "columns"])
         #expect(command == .layout(appQuery: "ghostty", layout: .columns, pixel: nil))
+    }
+
+    @Test func shouldRunVibeAppWithOnlyXcodeNSFlags() {
+        // Xcode can inject e.g. `-NSShowNonLocalizedStrings` + `YES`; must not enable CLI.
+        #expect(
+            WindowCLI.shouldRun(
+                arguments: ["/x/VibeWindowManager", "-NSShowNonLocalizedStrings", "YES"]
+            ) == false
+        )
+    }
+
+    @Test func shouldRunVibeAppWithListApps() {
+        #expect(
+            WindowCLI.shouldRun(
+                arguments: ["/x/VibeWindowManager", "list-apps"]
+            ) == true
+        )
+    }
+
+    @Test func shouldRunWindowsSymlinkWithNoArgs() {
+        #expect(
+            WindowCLI.shouldRun(
+                arguments: ["/x/windows"]
+            ) == true
+        )
     }
 }

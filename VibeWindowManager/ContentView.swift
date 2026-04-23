@@ -23,6 +23,7 @@ enum LayoutProposal: Hashable {
 }
 
 struct ContentView: View {
+    @StateObject private var bridge = VibeBridgeServer()
     @State private var service = AXWindowLayoutService()
     @State private var runningApps: [AppChoice] = []
     @State private var windows: [ManagedWindow] = []
@@ -34,6 +35,31 @@ struct ContentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            GroupBox("iOS layout bridge (WebSocket)") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Mirror layout to the iOS app: start the server and the iPhone/iPad should discover this Mac over Bonjour on the same LAN. Manual fallback URL: `ws://192.168.x.x:\(bridge.port == 0 ? 19_842 : Int(bridge.port))/bridge`")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        TextField("App query (e.g. ghostty)", text: $bridge.appQuery)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 220)
+                        Toggle("Bridge server on", isOn: Binding(
+                            get: { bridge.isRunning },
+                            set: { on in
+                                if on { bridge.start() } else { bridge.stop() }
+                            }
+                        ))
+                    }
+                    if bridge.isRunning, bridge.port > 0 {
+                        Text("Bonjour service `\(bridge.serviceName)` on `_vibewm._tcp` — port \(bridge.port), path /bridge")
+                            .font(.caption.monospaced())
+                    }
+                    if let e = bridge.lastError {
+                        Text(e).font(.caption).foregroundStyle(.red)
+                    }
+                }
+            }
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("VibeWindowManager")

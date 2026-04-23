@@ -10,6 +10,15 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+// Private, long-stable AX API that returns the CGWindowID for an AXUIElement window.
+// Used widely by tiling WMs (yabai, Amethyst) since AXUIElement pointer addresses
+// returned by AXUIElementCopyAttributeValue are not stable across calls.
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
+
+// Dedup instrumentation so 30 Hz lookups do not flood the log.
+nonisolated(unsafe) private var loggedWindowIds: Set<String> = []
+
 struct ManagedWindow: Identifiable {
     let id: String
     let element: AXUIElement
@@ -106,8 +115,36 @@ struct AXWindowLayoutService {
     }
 
     private func windowIdentifier(for element: AXUIElement) -> String {
+        var wid: CGWindowID = 0
+        if _AXUIElementGetWindow(element, &wid) == .success, wid != 0 {
+            let id = "w-\(wid)"
+            // #region agent log
+            if !loggedWindowIds.contains(id) {
+                loggedWindowIds.insert(id)
+                AgentDebugLog.log(
+                    hypothesisId: "H5",
+                    location: "AXWindowLayoutService.windowIdentifier",
+                    message: "stable_id",
+                    data: ["wid": String(wid)]
+                )
+            }
+            // #endregion
+            return id
+        }
         let opaque = Unmanaged.passUnretained(element).toOpaque()
-        return String(describing: opaque)
+        let id = String(describing: opaque)
+        // #region agent log
+        if !loggedWindowIds.contains("fb:\(id)") {
+            loggedWindowIds.insert("fb:\(id)")
+            AgentDebugLog.log(
+                hypothesisId: "H5",
+                location: "AXWindowLayoutService.windowIdentifier",
+                message: "fallback_ptr_id",
+                data: ["ptr": id]
+            )
+        }
+        // #endregion
+        return id
     }
 
     /// Sets full frame. The incoming `rect` is in AppKit global coordinates; AX uses a top-left origin.

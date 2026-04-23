@@ -29,6 +29,29 @@ struct LayoutMirrorService {
         try ax.windows(for: app)
     }
 
+    /// Subset of `windows` that actually appear in the bridge layout: has a frame and normalizes into `ref`
+    /// (e.g. excludes AX noise / windows with no layout rect so they don’t appear on iOS).
+    ///
+    /// Sorted spatially (top-to-bottom, then left-to-right) so the ordering is stable across AX Z-order
+    /// changes. Without this, every call to `kAXRaiseAction` rotates the raised window to index 0 in the
+    /// AX windows list, which would make "Next" cycle only between the two most-recently-focused windows
+    /// and cause iOS tiles to visually swap on every focus change.
+    static func windowsInLayoutRef(_ windows: [ManagedWindow], ref: CGRect) -> [ManagedWindow] {
+        guard !ref.isEmpty, ref.width > 0, ref.height > 0 else { return [] }
+        let kept = windows.compactMap { w -> ManagedWindow? in
+            guard let f = w.frame else { return nil }
+            guard Self.normalize(frame: f, to: ref) != nil else { return nil }
+            return w
+        }
+        return kept.sorted { a, b in
+            let fa = a.frame ?? .zero
+            let fb = b.frame ?? .zero
+            if fa.minY != fb.minY { return fa.minY < fb.minY }
+            if fa.minX != fb.minX { return fa.minX < fb.minX }
+            return a.id < b.id
+        }
+    }
+
     /// Build one `layout` message; `ref` is usually `mainDisplayLayoutFrame()`.
     func layoutMessage(
         seq: UInt64,
@@ -38,11 +61,11 @@ struct LayoutMirrorService {
         selectedId: String?
     ) -> BridgeLayoutMessage? {
         guard !ref.isEmpty, ref.width > 0, ref.height > 0 else { return nil }
+        let layoutWins = Self.windowsInLayoutRef(windows, ref: ref)
         var items: [BridgeWindow] = []
-        items.reserveCapacity(windows.count)
-        for (i, w) in windows.enumerated() {
-            guard let f = w.frame else { continue }
-            guard let n = Self.normalize(frame: f, to: ref) else { continue }
+        items.reserveCapacity(layoutWins.count)
+        for (i, w) in layoutWins.enumerated() {
+            guard let f = w.frame, let n = Self.normalize(frame: f, to: ref) else { continue }
             items.append(
                 BridgeWindow(
                     id: w.id,

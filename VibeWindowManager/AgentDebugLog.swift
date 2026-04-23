@@ -8,7 +8,7 @@
 import Foundation
 
 enum AgentDebugLog {
-    private static let logPath = "/Users/thomasguntenaar/Desktop/code.nosync/guntech/pixeloffice/.cursor/debug-155edc.log"
+    private static let logPath = "/Users/thomasguntenaar/Desktop/code.nosync/guntech/pixeloffice/.cursor/debug-b9605b.log"
 
     static func log(
         hypothesisId: String,
@@ -17,7 +17,7 @@ enum AgentDebugLog {
         data: [String: String] = [:]
     ) {
         let payload: [String: Any] = [
-            "sessionId": "155edc",
+            "sessionId": "b9605b",
             "timestamp": Int(Date().timeIntervalSince1970 * 1000),
             "hypothesisId": hypothesisId,
             "location": location,

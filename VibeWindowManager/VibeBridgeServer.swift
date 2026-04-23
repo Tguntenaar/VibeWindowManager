@@ -41,6 +41,8 @@ final class VibeBridgeServer: ObservableObject {
     private var selectedId: String?
     private var lastWindows: [ManagedWindow] = []
     private var lastResolvedApp: NSRunningApplication?
+    /// Throttle state for diagnostic logging so the 6 Hz layout tick does not flood the log.
+    private var lastLoggedLayoutSignature: String?
 
     func start() {
         guard !isRunning else { return }
@@ -138,21 +140,45 @@ final class VibeBridgeServer: ObservableObject {
 
     private func pushLayoutIfNeeded() {
         axService = AXWindowLayoutService()
-        guard axService.isProcessTrusted else { return }
+        guard axService.isProcessTrusted else {
+            logLayoutStage("skip:not_trusted", data: [:])
+            return
+        }
         let apps = AppQueryResolver.runningRegularApps()
-        guard let r = AppQueryResolver.resolve(query: appQuery, in: apps) else { return }
-        if r.ambiguous { return }
-        guard let app = r.app else { return }
+        guard let r = AppQueryResolver.resolve(query: appQuery, in: apps) else {
+            logLayoutStage("skip:no_match", data: ["query": appQuery])
+            return
+        }
+        if r.ambiguous {
+            logLayoutStage("skip:ambiguous", data: [
+                "query": appQuery,
+                "candidates": r.candidates.map { $0.bundleIdentifier ?? $0.localizedName ?? "?" }.joined(separator: ",")
+            ])
+            return
+        }
+        guard let app = r.app else {
+            logLayoutStage("skip:nil_app", data: ["query": appQuery])
+            return
+        }
         lastResolvedApp = app
         let ref: CGRect
         if let f = mirror.mainDisplayLayoutFrame() { ref = f }
-        else { return }
-        if ref.isEmpty { return }
+        else {
+            logLayoutStage("skip:no_ref", data: [:])
+            return
+        }
+        if ref.isEmpty {
+            logLayoutStage("skip:empty_ref", data: [:])
+            return
+        }
         do {
             let wins = try mirror.windows(for: app)
-            lastWindows = wins
-            if let sid = selectedId, !wins.contains(where: { $0.id == sid }) { selectedId = wins.first?.id }
-            if selectedId == nil { selectedId = wins.first?.id }
+            // Match iOS/bridge: only windows that get a layout rect (not every AX "window" slot).
+            let inLayout = LayoutMirrorService.windowsInLayoutRef(wins, ref: ref)
+            lastWindows = inLayout
+            if let sid = selectedId, !inLayout.contains(where: { $0.id == sid }) { selectedId = inLayout.first?.id }
+            if selectedId == nil { selectedId = inLayout.first?.id }
+            logLayoutCounts(wins: wins, inLayout: inLayout, ref: ref, app: app)
             guard
                 let msg = mirror.layoutMessage(
                     seq: seq,
@@ -161,13 +187,60 @@ final class VibeBridgeServer: ObservableObject {
                     windows: wins,
                     selectedId: selectedId
                 )
-            else { return }
+            else {
+                logLayoutStage("skip:no_layout_msg", data: ["wins": String(wins.count)])
+                return
+            }
             seq &+= 1
             guard let data = try? encoder.encode(msg), let json = String(data: data, encoding: .utf8) else { return }
             if json == lastLayoutJSON { return }
             lastLayoutJSON = json
             broadcast(json)
-        } catch { /* no-op */ }
+        } catch {
+            logLayoutStage("ax_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    /// Log `pushLayoutIfNeeded` counts + per-window frame state on change only (throttle against 6 Hz).
+    private func logLayoutCounts(wins: [ManagedWindow], inLayout: [ManagedWindow], ref: CGRect, app: NSRunningApplication) {
+        let sig = "\(wins.count)/\(inLayout.count)/\(selectedId ?? "-")"
+        guard sig != lastLoggedLayoutSignature else { return }
+        lastLoggedLayoutSignature = sig
+        let bundle = app.bundleIdentifier ?? (app.localizedName ?? "?")
+        let winsDesc = wins.enumerated().map { i, w -> String in
+            let title = w.title.count > 40 ? String(w.title.prefix(40)) + "…" : w.title
+            if let f = w.frame {
+                let zero = (f.width <= 0 || f.height <= 0) ? ",zero" : ""
+                return "\(i):[\(Int(f.width))x\(Int(f.height))@\(Int(f.minX)),\(Int(f.minY))\(zero)]\(title)"
+            }
+            return "\(i):[nil]\(title)"
+        }.joined(separator: " | ")
+        AgentDebugLog.log(
+            hypothesisId: "H5",
+            location: "VibeBridgeServer.pushLayoutIfNeeded",
+            message: "layout_counts",
+            data: [
+                "app": bundle,
+                "wins": String(wins.count),
+                "inLayout": String(inLayout.count),
+                "ref": "\(Int(ref.width))x\(Int(ref.height))@\(Int(ref.minX)),\(Int(ref.minY))",
+                "selectedId": selectedId ?? "-",
+                "windows": winsDesc
+            ]
+        )
+    }
+
+    private func logLayoutStage(_ message: String, data: [String: String]) {
+        // Only fire once per distinct skip state so we don't flood the log every 166 ms.
+        let sig = "stage:\(message):" + data.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ",")
+        guard sig != lastLoggedLayoutSignature else { return }
+        lastLoggedLayoutSignature = sig
+        AgentDebugLog.log(
+            hypothesisId: "H5",
+            location: "VibeBridgeServer.pushLayoutIfNeeded",
+            message: message,
+            data: data
+        )
     }
 
     private func adopt(_ c: NWConnection) {
@@ -206,6 +279,12 @@ final class VibeBridgeServer: ObservableObject {
         let data = Data(s.utf8)
         let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         let type = (obj["type"] as? String) ?? ""
+        AgentDebugLog.log(
+            hypothesisId: "H5",
+            location: "VibeBridgeServer.handleClientJSON",
+            message: "client_msg",
+            data: ["type": type, "lastWindows": String(lastWindows.count)]
+        )
         switch type {
         case BridgeMessageType.ping.rawValue:
             if let t = (try? decoder.decode(BridgePing.self, from: data))?.t {
@@ -225,7 +304,12 @@ final class VibeBridgeServer: ObservableObject {
         case BridgeMessageType.transcribe.rawValue:
             runTranscribe(data: data)
         default:
-            break
+            AgentDebugLog.log(
+                hypothesisId: "H5",
+                location: "VibeBridgeServer.handleClientJSON",
+                message: "unknown_type",
+                data: ["type": type]
+            )
         }
     }
 
@@ -239,8 +323,17 @@ final class VibeBridgeServer: ObservableObject {
     }
 
     private func runSelectNext() {
-        guard !lastWindows.isEmpty else { return }
+        guard !lastWindows.isEmpty else {
+            AgentDebugLog.log(
+                hypothesisId: "H5",
+                location: "VibeBridgeServer.runSelectNext",
+                message: "skipped:empty_lastWindows",
+                data: [:]
+            )
+            return
+        }
         let n = lastWindows.count
+        let from = selectedId ?? "-"
         let next: String
         if let s = selectedId, let i = lastWindows.firstIndex(where: { $0.id == s }) {
             next = lastWindows[(i + 1) % n].id
@@ -248,6 +341,12 @@ final class VibeBridgeServer: ObservableObject {
             next = lastWindows[0].id
         }
         selectedId = next
+        AgentDebugLog.log(
+            hypothesisId: "H5",
+            location: "VibeBridgeServer.runSelectNext",
+            message: "cycling",
+            data: ["count": String(n), "from": from, "to": next]
+        )
         runSelectFocus(to: next)
     }
 
@@ -257,7 +356,10 @@ final class VibeBridgeServer: ObservableObject {
         else { return }
         do {
             try VibeFocusPaster.focus(window: w, app: app)
-            VibeFocusPaster.pasteClearText(text)
+            // Target must be key before synthetic Cmd+V; an immediate paste often goes nowhere.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                VibeFocusPaster.pasteClearText(text)
+            }
         } catch { lastError = error.localizedDescription }
     }
 

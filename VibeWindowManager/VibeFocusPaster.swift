@@ -11,7 +11,9 @@ import Foundation
 
 @MainActor
 enum VibeFocusPaster {
-    private static var pasteKeyCode: CGKeyCode { 9 } // v
+    /// Left / right Command (US QWERTY). Used to hold Command while "V" is pressed.
+    private static var commandKey: CGKeyCode { 55 }
+    private static var vKey: CGKeyCode { 9 } // kVK_ANSI_V
 
     static func focus(window: ManagedWindow, app: NSRunningApplication) throws {
         if !app.activate(options: .activateAllWindows) { _ = app.activate(options: .activateIgnoringOtherApps) }
@@ -20,23 +22,33 @@ enum VibeFocusPaster {
         if err != .success { throw LayoutError.cannotSetFrame }
     }
 
+    /// Puts `text` on the pasteboard, then (after the next run-loop turn) posts Cmd+V as real key-down / key-up
+    /// so terminal apps and Ghostty receive a normal paste sequence.
     static func pasteClearText(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        postKeyCommand(key: pasteKeyCode, useCommand: true)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        // One tick so the pasteboard and frontmost app are ready; HID apps often miss immediate paste.
+        DispatchQueue.main.async {
+            postCommandV()
+        }
     }
 
-    private static func postKeyCommand(key: CGKeyCode, useCommand: Bool) {
+    private static func postCommandV() {
         let src = CGEventSource(stateID: .hidSystemState)
-        var flags: CGEventFlags = []
-        if useCommand { flags.insert(.maskCommand) }
-        if let d = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true) {
-            d.flags = flags
+        if let d = CGEvent(keyboardEventSource: src, virtualKey: commandKey, keyDown: true) {
             d.post(tap: .cghidEventTap)
         }
-        if let u = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false) {
-            u.flags = flags
-            u.post(tap: .cghidEventTap)
+        if let d = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true) {
+            d.flags = .maskCommand
+            d.post(tap: .cghidEventTap)
+        }
+        if let d = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: false) {
+            d.flags = .maskCommand
+            d.post(tap: .cghidEventTap)
+        }
+        if let d = CGEvent(keyboardEventSource: src, virtualKey: commandKey, keyDown: false) {
+            d.post(tap: .cghidEventTap)
         }
     }
 }

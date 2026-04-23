@@ -127,3 +127,26 @@ struct WindowLayoutEngineTests {
         #expect(layoutFrame.width == 1440 - StageManagerSupport.reservedLeadingStripWidth)
     }
 }
+
+@MainActor
+struct WindowCLITests {
+    @Test func parseListApps() throws {
+        let command = try WindowCLI.parse(userArguments: ["list-apps"])
+        #expect(command == .listApps)
+    }
+
+    @Test func parseHelp() throws {
+        let command = try WindowCLI.parse(userArguments: ["help"])
+        #expect(command == .help)
+    }
+
+    @Test func parseCascadeWithPixel() throws {
+        let command = try WindowCLI.parse(userArguments: ["cursor", "cascade", "--pixel", "30"])
+        #expect(command == .layout(appQuery: "cursor", layout: .cascade, pixel: 30))
+    }
+
+    @Test func parseColumns() throws {
+        let command = try WindowCLI.parse(userArguments: ["ghostty", "columns"])
+        #expect(command == .layout(appQuery: "ghostty", layout: .columns, pixel: nil))
+    }
+}

@@ -41,32 +41,16 @@ final class VibeBridgeServer: ObservableObject {
     private var selectedId: String?
     private var lastWindows: [ManagedWindow] = []
     private var lastResolvedApp: NSRunningApplication?
-    /// Throttle state for diagnostic logging so the 6 Hz layout tick does not flood the log.
-    private var lastLoggedLayoutSignature: String?
 
     func start() {
         guard !isRunning else { return }
         lastError = nil
         axService = AXWindowLayoutService()
         guard axService.isProcessTrusted else {
-            // #region agent log
-            AgentDebugLog.log(hypothesisId: "H3", location: "VibeBridgeServer.start", message: "abort_not_trusted", data: [:])
-            // #endregion
             lastError = "Enable Accessibility for VibeWindowManager first."
             return
         }
         do {
-            // #region agent log
-            AgentDebugLog.log(
-                hypothesisId: "H3",
-                location: "VibeBridgeServer.start",
-                message: "listener_creating",
-                data: [
-                    "port": String(Self.defaultPort),
-                    "bonjour": Self.bonjourType,
-                ]
-            )
-            // #endregion
             guard let p = NWEndpoint.Port(rawValue: Self.defaultPort) else { return }
             let l = try NWListener(using: .tcp, on: p)
             l.service = NWListener.Service(name: serviceName, type: Self.bonjourType)
@@ -91,18 +75,6 @@ final class VibeBridgeServer: ObservableObject {
     }
 
     private func onListenerState(_ state: NWListener.State) {
-        // #region agent log
-        let stateStr: String
-        switch state {
-        case .ready: stateStr = "ready"
-        case .failed(let e): stateStr = "failed:\(e.localizedDescription)"
-        case .cancelled: stateStr = "cancelled"
-        case .setup: stateStr = "setup"
-        case .waiting(let e): stateStr = "waiting:\(e.localizedDescription)"
-        @unknown default: stateStr = "unknown"
-        }
-        AgentDebugLog.log(hypothesisId: "H3", location: "VibeBridgeServer.onListenerState", message: "state", data: ["state": stateStr])
-        // #endregion
         switch state {
         case .ready:
             lastError = nil
@@ -140,37 +112,13 @@ final class VibeBridgeServer: ObservableObject {
 
     private func pushLayoutIfNeeded() {
         axService = AXWindowLayoutService()
-        guard axService.isProcessTrusted else {
-            logLayoutStage("skip:not_trusted", data: [:])
-            return
-        }
+        guard axService.isProcessTrusted else { return }
         let apps = AppQueryResolver.runningRegularApps()
-        guard let r = AppQueryResolver.resolve(query: appQuery, in: apps) else {
-            logLayoutStage("skip:no_match", data: ["query": appQuery])
-            return
-        }
-        if r.ambiguous {
-            logLayoutStage("skip:ambiguous", data: [
-                "query": appQuery,
-                "candidates": r.candidates.map { $0.bundleIdentifier ?? $0.localizedName ?? "?" }.joined(separator: ",")
-            ])
-            return
-        }
-        guard let app = r.app else {
-            logLayoutStage("skip:nil_app", data: ["query": appQuery])
-            return
-        }
+        guard let r = AppQueryResolver.resolve(query: appQuery, in: apps) else { return }
+        if r.ambiguous { return }
+        guard let app = r.app else { return }
         lastResolvedApp = app
-        let ref: CGRect
-        if let f = mirror.mainDisplayLayoutFrame() { ref = f }
-        else {
-            logLayoutStage("skip:no_ref", data: [:])
-            return
-        }
-        if ref.isEmpty {
-            logLayoutStage("skip:empty_ref", data: [:])
-            return
-        }
+        guard let ref = mirror.mainDisplayLayoutFrame(), !ref.isEmpty else { return }
         do {
             let wins = try mirror.windows(for: app)
             // Match iOS/bridge: only windows that get a layout rect (not every AX "window" slot).
@@ -178,7 +126,6 @@ final class VibeBridgeServer: ObservableObject {
             lastWindows = inLayout
             if let sid = selectedId, !inLayout.contains(where: { $0.id == sid }) { selectedId = inLayout.first?.id }
             if selectedId == nil { selectedId = inLayout.first?.id }
-            logLayoutCounts(wins: wins, inLayout: inLayout, ref: ref, app: app)
             guard
                 let msg = mirror.layoutMessage(
                     seq: seq,
@@ -187,66 +134,18 @@ final class VibeBridgeServer: ObservableObject {
                     windows: wins,
                     selectedId: selectedId
                 )
-            else {
-                logLayoutStage("skip:no_layout_msg", data: ["wins": String(wins.count)])
-                return
-            }
+            else { return }
             seq &+= 1
             guard let data = try? encoder.encode(msg), let json = String(data: data, encoding: .utf8) else { return }
             if json == lastLayoutJSON { return }
             lastLayoutJSON = json
             broadcast(json)
         } catch {
-            logLayoutStage("ax_error", data: ["error": error.localizedDescription])
+            lastError = error.localizedDescription
         }
     }
 
-    /// Log `pushLayoutIfNeeded` counts + per-window frame state on change only (throttle against 6 Hz).
-    private func logLayoutCounts(wins: [ManagedWindow], inLayout: [ManagedWindow], ref: CGRect, app: NSRunningApplication) {
-        let sig = "\(wins.count)/\(inLayout.count)/\(selectedId ?? "-")"
-        guard sig != lastLoggedLayoutSignature else { return }
-        lastLoggedLayoutSignature = sig
-        let bundle = app.bundleIdentifier ?? (app.localizedName ?? "?")
-        let winsDesc = wins.enumerated().map { i, w -> String in
-            let title = w.title.count > 40 ? String(w.title.prefix(40)) + "…" : w.title
-            if let f = w.frame {
-                let zero = (f.width <= 0 || f.height <= 0) ? ",zero" : ""
-                return "\(i):[\(Int(f.width))x\(Int(f.height))@\(Int(f.minX)),\(Int(f.minY))\(zero)]\(title)"
-            }
-            return "\(i):[nil]\(title)"
-        }.joined(separator: " | ")
-        AgentDebugLog.log(
-            hypothesisId: "H5",
-            location: "VibeBridgeServer.pushLayoutIfNeeded",
-            message: "layout_counts",
-            data: [
-                "app": bundle,
-                "wins": String(wins.count),
-                "inLayout": String(inLayout.count),
-                "ref": "\(Int(ref.width))x\(Int(ref.height))@\(Int(ref.minX)),\(Int(ref.minY))",
-                "selectedId": selectedId ?? "-",
-                "windows": winsDesc
-            ]
-        )
-    }
-
-    private func logLayoutStage(_ message: String, data: [String: String]) {
-        // Only fire once per distinct skip state so we don't flood the log every 166 ms.
-        let sig = "stage:\(message):" + data.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ",")
-        guard sig != lastLoggedLayoutSignature else { return }
-        lastLoggedLayoutSignature = sig
-        AgentDebugLog.log(
-            hypothesisId: "H5",
-            location: "VibeBridgeServer.pushLayoutIfNeeded",
-            message: message,
-            data: data
-        )
-    }
-
     private func adopt(_ c: NWConnection) {
-        // #region agent log
-        AgentDebugLog.log(hypothesisId: "H4", location: "VibeBridgeServer.adopt", message: "new_tcp", data: ["connections": String(connections.count)])
-        // #endregion
         let id = UUID()
         let wire = VibeWireConnection(
             c,
@@ -279,12 +178,6 @@ final class VibeBridgeServer: ObservableObject {
         let data = Data(s.utf8)
         let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         let type = (obj["type"] as? String) ?? ""
-        AgentDebugLog.log(
-            hypothesisId: "H5",
-            location: "VibeBridgeServer.handleClientJSON",
-            message: "client_msg",
-            data: ["type": type, "lastWindows": String(lastWindows.count)]
-        )
         switch type {
         case BridgeMessageType.ping.rawValue:
             if let t = (try? decoder.decode(BridgePing.self, from: data))?.t {
@@ -303,14 +196,70 @@ final class VibeBridgeServer: ObservableObject {
             }
         case BridgeMessageType.transcribe.rawValue:
             runTranscribe(data: data)
+        case BridgeMessageType.setWindowRect.rawValue:
+            do {
+                let msg = try decoder.decode(BridgeSetWindowRect.self, from: data)
+                runSetWindowRect(windowId: msg.windowId, rect: msg.rect)
+            } catch {
+                let msg = "setWindowRect JSON: \(error.localizedDescription)"
+                lastError = msg
+                sendToAllConnections(BridgeErrorMessage(message: msg))
+            }
         default:
-            AgentDebugLog.log(
-                hypothesisId: "H5",
-                location: "VibeBridgeServer.handleClientJSON",
-                message: "unknown_type",
-                data: ["type": type]
-            )
+            break
         }
+    }
+
+    private static let remoteResizeMinWidth: CGFloat = 200
+    private static let remoteResizeMinHeight: CGFloat = 120
+
+    private func runSetWindowRect(windowId: String, rect: BridgeRect) {
+        func fail(_ message: String) {
+            lastError = message
+            sendToAllConnections(BridgeErrorMessage(message: message))
+        }
+        guard let app = lastResolvedApp else {
+            fail("setWindowRect: no resolved app (is the Mac bridge showing a layout?)")
+            return
+        }
+        guard axService.isProcessTrusted else {
+            fail("setWindowRect: Accessibility not granted for VibeWindowManager on the Mac")
+            return
+        }
+        guard let ref = mirror.mainDisplayLayoutFrame(), !ref.isEmpty else {
+            fail("setWindowRect: could not read main display layout frame")
+            return
+        }
+        let global = LayoutMirrorService.denormalize(bridgeRect: rect, to: ref)
+        let clamped = Self.clampFrame(global, minW: Self.remoteResizeMinWidth, minH: Self.remoteResizeMinHeight)
+        let screens = NSScreen.screens
+        let wins: [ManagedWindow]
+        do {
+            wins = try mirror.windows(for: app)
+        } catch {
+            fail("setWindowRect: cannot list windows — \(error.localizedDescription)")
+            return
+        }
+        guard let w = wins.first(where: { $0.id == windowId }) else {
+            fail("setWindowRect: unknown window id \(windowId)")
+            return
+        }
+        do {
+            try axService.setFrame(w.element, clamped, allScreens: screens)
+            selectedId = windowId
+            lastLayoutJSON = nil
+        } catch {
+            let msg = error.localizedDescription
+            lastError = msg
+            sendToAllConnections(BridgeErrorMessage(message: msg))
+        }
+    }
+
+    private static func clampFrame(_ r: CGRect, minW: CGFloat, minH: CGFloat) -> CGRect {
+        var r = r
+        if r.width < minW { r.size.width = minW }
+        if r.height < minH { r.size.height = minH }
+        return r
     }
 
     private func runSelectFocus(to id: String) {
@@ -323,17 +272,8 @@ final class VibeBridgeServer: ObservableObject {
     }
 
     private func runSelectNext() {
-        guard !lastWindows.isEmpty else {
-            AgentDebugLog.log(
-                hypothesisId: "H5",
-                location: "VibeBridgeServer.runSelectNext",
-                message: "skipped:empty_lastWindows",
-                data: [:]
-            )
-            return
-        }
+        guard !lastWindows.isEmpty else { return }
         let n = lastWindows.count
-        let from = selectedId ?? "-"
         let next: String
         if let s = selectedId, let i = lastWindows.firstIndex(where: { $0.id == s }) {
             next = lastWindows[(i + 1) % n].id
@@ -341,12 +281,6 @@ final class VibeBridgeServer: ObservableObject {
             next = lastWindows[0].id
         }
         selectedId = next
-        AgentDebugLog.log(
-            hypothesisId: "H5",
-            location: "VibeBridgeServer.runSelectNext",
-            message: "cycling",
-            data: ["count": String(n), "from": from, "to": next]
-        )
         runSelectFocus(to: next)
     }
 

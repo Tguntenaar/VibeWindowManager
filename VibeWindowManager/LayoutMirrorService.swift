@@ -102,4 +102,16 @@ struct LayoutMirrorService {
         let nh = h / ref.height
         return BridgeRect(x: nx, y: ny, width: nw, height: nh)
     }
+
+    /// Inverse of `normalize`: builds an AppKit-global frame from normalized bridge coords and the same `ref`.
+    nonisolated static func denormalize(bridgeRect: BridgeRect, to ref: CGRect) -> CGRect {
+        let nw = CGFloat(bridgeRect.width)
+        let nh = CGFloat(bridgeRect.height)
+        let w = nw * ref.width
+        let h = nh * ref.height
+        let minX = ref.minX + CGFloat(bridgeRect.x) * ref.width
+        let maxY = ref.maxY - CGFloat(bridgeRect.y) * ref.height
+        let minY = maxY - h
+        return CGRect(x: minX, y: minY, width: w, height: h)
+    }
 }

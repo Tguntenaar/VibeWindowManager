@@ -32,6 +32,9 @@ struct ContentView: View {
     @State private var selectedProposal: LayoutProposal?
     @State private var cascadeInsetStep: Double = CascadeDefaults.insetStep
     @State private var lastError: String?
+    @State private var tailnetSelf: TailscaleSelfStatus?
+    @State private var tailnetChecked: Bool = false
+    @State private var primaryLANIPv4: LANIPv4Enumerator.Entry?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -55,6 +58,8 @@ struct ContentView: View {
                         Text("Bonjour service `\(bridge.serviceName)` on `_vibewm._tcp` — port \(bridge.port), path /bridge")
                             .font(.caption.monospaced())
                     }
+                    localIPv4Row
+                    tailnetHostRow
                     if let e = bridge.lastError {
                         Text(e).font(.caption).foregroundStyle(.red)
                     }
@@ -222,11 +227,16 @@ struct ContentView: View {
             refreshAppsList()
             refreshStatus()
             refreshWindows()
+            refreshNetworkHints()
+            if !bridge.isRunning {
+                bridge.start()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             service = AXWindowLayoutService()
             refreshAppsList()
             refreshWindows()
+            refreshNetworkHints()
         }
         .onChange(of: selectedAppPID) { _, _ in
             refreshWindows()
@@ -239,6 +249,101 @@ struct ContentView: View {
     private func openAccessibilitySettings() {
         if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(u)
+        }
+    }
+
+    @ViewBuilder
+    private var localIPv4Row: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: "network")
+                .foregroundStyle(.secondary)
+                .frame(width: 17, alignment: .center)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("This Mac (LAN)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let p = primaryLANIPv4 {
+                    Text(p.address)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                } else {
+                    Text("None detected — connect Wi‑Fi/Ethernet or tap refresh.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            Spacer(minLength: 8)
+            Button("Copy WebSocket URL") {
+                guard let host = primaryLANIPv4?.address else { return }
+                let url = bridgeWebSocketURL(host: host)
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(url, forType: .string)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(primaryLANIPv4 == nil)
+        }
+    }
+
+    /// Matches `VibeBridgeServer.defaultPort` when the listener has not reported a port yet.
+    private var bridgeWebSocketPort: Int {
+        Int(bridge.port == 0 ? 19_842 : bridge.port)
+    }
+
+    private func bridgeWebSocketURL(host: String) -> String {
+        "ws://\(host):\(bridgeWebSocketPort)/bridge"
+    }
+
+    @ViewBuilder
+    private var tailnetHostRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "network.badge.shield.half.filled")
+                .foregroundStyle(tailnetSelf == nil ? Color.secondary : Color.green)
+            if let s = tailnetSelf {
+                let display = s.dnsName.isEmpty ? s.hostName : s.dnsName
+                Text("Tailnet hostname: ")
+                    .font(.caption)
+                + Text(display)
+                    .font(.caption.monospaced())
+                Button("Copy") {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(display, forType: .string)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Spacer()
+            } else if tailnetChecked {
+                Text("Tailscale CLI not found (install Tailscale.app or Homebrew) — iOS can still use Bonjour or a manual IP.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Checking Tailscale…").font(.caption).foregroundStyle(.secondary)
+            }
+            Button {
+                refreshNetworkHints()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("Refresh LAN IPv4 list and Tailscale status")
+        }
+    }
+
+    private func refreshNetworkHints() {
+        primaryLANIPv4 = LANIPv4Enumerator.allEntries().first
+        refreshTailnet()
+    }
+
+    private func refreshTailnet() {
+        tailnetChecked = false
+        Task.detached(priority: .utility) {
+            let result = TailscaleDetector.readSelf()
+            await MainActor.run {
+                tailnetSelf = result
+                tailnetChecked = true
+            }
         }
     }
 

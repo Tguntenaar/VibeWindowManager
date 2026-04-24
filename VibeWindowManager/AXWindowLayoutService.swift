@@ -16,9 +16,6 @@ import Foundation
 @_silgen_name("_AXUIElementGetWindow")
 private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
 
-// Dedup instrumentation so 30 Hz lookups do not flood the log.
-nonisolated(unsafe) private var loggedWindowIds: Set<String> = []
-
 struct ManagedWindow: Identifiable {
     let id: String
     let element: AXUIElement
@@ -114,37 +111,17 @@ struct AXWindowLayoutService {
         return "Untitled window"
     }
 
+    /// Stable per-window identifier. AX returns a fresh `AXUIElementRef` object each call, so raw pointer
+    /// addresses cannot be used as wire IDs — they churn on every 6 Hz push. `_AXUIElementGetWindow` is a
+    /// long-standing private API (used by yabai, Amethyst, etc.) that returns the `CGWindowID`, which is
+    /// stable for the window's lifetime.
     private func windowIdentifier(for element: AXUIElement) -> String {
         var wid: CGWindowID = 0
         if _AXUIElementGetWindow(element, &wid) == .success, wid != 0 {
-            let id = "w-\(wid)"
-            // #region agent log
-            if !loggedWindowIds.contains(id) {
-                loggedWindowIds.insert(id)
-                AgentDebugLog.log(
-                    hypothesisId: "H5",
-                    location: "AXWindowLayoutService.windowIdentifier",
-                    message: "stable_id",
-                    data: ["wid": String(wid)]
-                )
-            }
-            // #endregion
-            return id
+            return "w-\(wid)"
         }
         let opaque = Unmanaged.passUnretained(element).toOpaque()
-        let id = String(describing: opaque)
-        // #region agent log
-        if !loggedWindowIds.contains("fb:\(id)") {
-            loggedWindowIds.insert("fb:\(id)")
-            AgentDebugLog.log(
-                hypothesisId: "H5",
-                location: "AXWindowLayoutService.windowIdentifier",
-                message: "fallback_ptr_id",
-                data: ["ptr": id]
-            )
-        }
-        // #endregion
-        return id
+        return String(describing: opaque)
     }
 
     /// Sets full frame. The incoming `rect` is in AppKit global coordinates; AX uses a top-left origin.

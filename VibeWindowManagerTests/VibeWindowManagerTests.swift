@@ -192,3 +192,24 @@ struct WindowCLITests {
         )
     }
 }
+
+struct LayoutMirrorNormalizeTests {
+    @Test func normalizeDenormalizeRoundTrip() {
+        let ref = CGRect(x: 100, y: 50, width: 1440, height: 900)
+        let frames = [
+            CGRect(x: 100, y: 200, width: 400, height: 300),
+            CGRect(x: 2000, y: 100, width: 500, height: 600),
+        ]
+        for f in frames {
+            guard let n = LayoutMirrorService.normalize(frame: f, to: ref) else {
+                Issue.record("expected normalize for \(f)")
+                continue
+            }
+            let back = LayoutMirrorService.denormalize(bridgeRect: n, to: ref)
+            #expect(abs(back.minX - f.minX) < 0.5)
+            #expect(abs(back.minY - f.minY) < 0.5)
+            #expect(abs(back.width - f.width) < 0.5)
+            #expect(abs(back.height - f.height) < 0.5)
+        }
+    }
+}

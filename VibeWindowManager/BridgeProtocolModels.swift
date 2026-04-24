@@ -21,6 +21,7 @@ enum BridgeMessageType: String, Codable {
     case transcribe
     case transcribeResult
     case error
+    case setWindowRect
 }
 
 // MARK: - Outgoing (server)
@@ -90,6 +91,12 @@ struct BridgeSelectNext: Codable {
     var type: String
 }
 
+struct BridgeSetWindowRect: Codable {
+    var type: String
+    var windowId: String
+    var rect: BridgeRect
+}
+
 struct BridgePasteText: Codable {
     var type: String
     var text: String
@@ -126,6 +133,8 @@ func decodeClientMessage(from string: String) throws -> Any {
         return try decoder.decode(BridgePasteText.self, from: data)
     case BridgeMessageType.transcribe.rawValue:
         return try decoder.decode(BridgeTranscribe.self, from: data)
+    case BridgeMessageType.setWindowRect.rawValue:
+        return try decoder.decode(BridgeSetWindowRect.self, from: data)
     default:
         throw BridgeJSONDecodeError.unknownType(type)
     }

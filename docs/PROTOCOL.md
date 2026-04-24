@@ -6,12 +6,22 @@
 - All payloads are **UTF-8 text** WebSocket **text** frames, one **JSON object per message** (not newline-delimited; each WS message is one JSON value).
 - **Bonjour** discovery: service type `_vibewm._tcp`, port same as WebSocket. Current implementation advertises the Mac by hostname/service name and the iOS app browses/resolves it automatically on the same LAN.
 
+## Discovery / connect order (iOS client)
+
+The client picks an endpoint in this order on auto-connect:
+
+1. **Tailnet** — if the user has set a Tailnet hostname (Tailscale MagicDNS, e.g. `my-mac.tailxxxx.ts.net`, or the short `<host>`), the client opens `ws://<host>:19842/bridge` directly and runs a **6 s fallback timer**. If it receives a `layout` message within the window, the Tailnet path is kept; otherwise the client cancels the attempt and continues with Bonjour.
+2. **Bonjour** — browse `_vibewm._tcp`, resolve, auto-connect to the first service.
+3. **Manual** — `host:port` or full `ws://…` entered by the user.
+
+The protocol itself does **not** change across paths; discovery only decides the `host:port` used in the WebSocket URL. Requires Tailscale running on both devices (with MagicDNS on iPhone) for the Tailnet path.
+
 ## Client handshake
 
 1. Client connects via WebSocket GET `/bridge`.
 2. Server may send a `serverHello` (optional) immediately; client may send `clientHello` after connect.
 3. Server repeatedly pushes `layout` when windows change (throttled, ~5–10/s max).
-4. Client sends `select`, `selectNext`, `ping`, and optional `transcribe` / `ping`.
+4. Client sends `select`, `selectNext`, `setWindowRect`, `ping`, and optional `transcribe` / `ping`.
 
 ## Message types (JSON `type` field)
 
@@ -70,6 +80,18 @@ Focus the next window in **z-order / list order** (server-defined: same order as
 
 ```json
 { "type": "selectNext" }
+```
+
+### `setWindowRect` (client → server)
+
+Move or resize a window. `rect` uses the **same normalized top-left convention** as `layout.windows[].rect` (relative to the server’s current `reference` / main-display layout frame). The server applies the frame via Accessibility; on failure it may send an `error` message.
+
+```json
+{
+  "type": "setWindowRect",
+  "windowId": "abc123",
+  "rect": { "x": 0.1, "y": 0.1, "width": 0.4, "height": 0.5 }
+}
 ```
 
 ### `pasteText` (client → server)

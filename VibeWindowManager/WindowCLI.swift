@@ -174,8 +174,9 @@ enum WindowCLI {
         }
         guard let app = r.app else { return 1 }
         let mirror = LayoutMirrorService()
+        let screens = NSScreen.screens
         let ref: CGRect
-        if let f = mirror.mainDisplayLayoutFrame() { ref = f }
+        if let f = mirror.desktopLayoutFrame(screens: screens) { ref = f }
         else {
             fputs("error: No layout frame (display?).\n", stderr)
             return 1
@@ -184,12 +185,14 @@ enum WindowCLI {
             fputs("error: Empty reference rect.\n", stderr)
             return 1
         }
+        let perScreen = mirror.screenLayoutFrames(screens: screens)
         do {
             let windows = try mirror.windows(for: app)
             if let msg = mirror.layoutMessage(
                 seq: 0,
                 app: app,
                 ref: ref,
+                perScreen: perScreen,
                 windows: windows,
                 selectedId: windows.first?.id
             ) {

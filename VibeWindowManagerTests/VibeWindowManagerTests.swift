@@ -104,15 +104,19 @@ struct WindowLayoutEngineTests {
     }
 
     @Test func appKitFrameConvertsToAXTopLeftPosition() {
+        let menuBar = CGRect(x: 0, y: 0, width: 1440, height: 900)
         let rect = CGRect(x: 100, y: 700, width: 400, height: 150)
 
-        let point = ScreenGeometry.axPosition(
-            forAppKitFrame: rect,
-            menuBarScreenFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
-        )
+        let point = ScreenGeometry.axPosition(forAppKitFrame: rect, menuBarScreenFrame: menuBar)
 
         #expect(point.x == 100)
         #expect(point.y == 50)
+
+        let back = ScreenGeometry.appKitFrame(axPosition: point, size: rect.size, menuBarScreenFrame: menuBar)
+        #expect(abs(back.minX - rect.minX) < 0.5)
+        #expect(abs(back.minY - rect.minY) < 0.5)
+        #expect(abs(back.width - rect.width) < 0.5)
+        #expect(abs(back.height - rect.height) < 0.5)
     }
 
     @Test func stageManagerReservesLeadingStripOnMenuBarDisplay() {
@@ -211,5 +215,61 @@ struct LayoutMirrorNormalizeTests {
             #expect(abs(back.width - f.width) < 0.5)
             #expect(abs(back.height - f.height) < 0.5)
         }
+    }
+
+    /// Two displays side-by-side: main at origin, external to the right. The desktop union covers
+    /// both, windows on either display normalize into the union's unit square, and denormalize
+    /// round-trips back to the original AppKit frame.
+    @Test func twoScreenUnionNormalizeDenormalizeRoundTrip() {
+        // Main: 1440x900 at origin. External: 1920x1080 right of main, top-aligned at y=0 bottom-left
+        // (AppKit global, bottom-left origin). Union bounding rect covers both.
+        let main = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let external = CGRect(x: 1440, y: 0, width: 1920, height: 1080)
+        let union = main.union(external)
+        #expect(union.origin == .zero)
+        #expect(union.width == 3360)
+        #expect(union.height == 1080)
+
+        // Window on external display, centered.
+        let winOnExternal = CGRect(x: 1440 + 300, y: 200, width: 600, height: 500)
+        guard let nExt = LayoutMirrorService.normalize(frame: winOnExternal, to: union) else {
+            Issue.record("expected normalize for external window")
+            return
+        }
+        // x should be > main_width/union_width = 1440/3360 ≈ 0.4286.
+        #expect(nExt.x > 0.42)
+        #expect(nExt.x < 1.0)
+        let backExt = LayoutMirrorService.denormalize(bridgeRect: nExt, to: union)
+        #expect(abs(backExt.minX - winOnExternal.minX) < 0.5)
+        #expect(abs(backExt.minY - winOnExternal.minY) < 0.5)
+        #expect(abs(backExt.width - winOnExternal.width) < 0.5)
+        #expect(abs(backExt.height - winOnExternal.height) < 0.5)
+
+        // Window on main display round-trips too.
+        let winOnMain = CGRect(x: 100, y: 100, width: 400, height: 300)
+        guard let nMain = LayoutMirrorService.normalize(frame: winOnMain, to: union) else {
+            Issue.record("expected normalize for main window")
+            return
+        }
+        #expect(nMain.x >= 0 && nMain.x < 0.43)
+        let backMain = LayoutMirrorService.denormalize(bridgeRect: nMain, to: union)
+        #expect(abs(backMain.minX - winOnMain.minX) < 0.5)
+        #expect(abs(backMain.minY - winOnMain.minY) < 0.5)
+
+        // Per-screen rects normalize inside the union.
+        guard
+            let nMainScreen = LayoutMirrorService.normalize(frame: main, to: union),
+            let nExtScreen = LayoutMirrorService.normalize(frame: external, to: union)
+        else {
+            Issue.record("expected normalize for per-screen rects")
+            return
+        }
+        #expect(abs(nMainScreen.x - 0) < 1e-6)
+        #expect(abs(nMainScreen.width - (1440.0 / 3360.0)) < 1e-6)
+        #expect(abs(nExtScreen.x - (1440.0 / 3360.0)) < 1e-6)
+        #expect(abs(nExtScreen.width - (1920.0 / 3360.0)) < 1e-6)
+        // External is taller than main; main top-edge sits `(1080-900)/1080` below the union top.
+        #expect(abs(nMainScreen.y - (180.0 / 1080.0)) < 1e-6)
+        #expect(abs(nExtScreen.y - 0) < 1e-6)
     }
 }

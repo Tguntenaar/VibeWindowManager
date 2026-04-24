@@ -57,4 +57,12 @@ enum ScreenGeometry {
     static func axPosition(forAppKitFrame rect: CGRect, menuBarScreenFrame: CGRect) -> CGPoint {
         CGPoint(x: rect.minX, y: menuBarScreenFrame.maxY - rect.maxY)
     }
+
+    /// Inverse of `axPosition(forAppKitFrame:menuBarScreenFrame:)`: builds an AppKit-global frame
+    /// (bottom-left origin, y increasing upward) from AX position + size.
+    static func appKitFrame(axPosition p: CGPoint, size s: CGSize, menuBarScreenFrame: CGRect) -> CGRect {
+        let maxY = menuBarScreenFrame.maxY - p.y
+        let minY = maxY - s.height
+        return CGRect(x: p.x, y: minY, width: s.width, height: s.height)
+    }
 }

@@ -42,7 +42,11 @@ struct BridgeLayoutMessage: Codable, Equatable {
     var seq: UInt64
     var appName: String?
     var bundleId: String?
+    /// Desktop-wide coordinate space (union of every display's layout frame in AppKit global coords).
+    /// All `windows[].rect` and `screens[]` entries are normalized 0..1 top-left relative to this.
     var reference: BridgeRect
+    /// Per-physical-display rects normalized against `reference`. Clients render one outline per entry.
+    var screens: [BridgeRect] = []
     var windows: [BridgeWindow]
     var selectedId: String?
 }

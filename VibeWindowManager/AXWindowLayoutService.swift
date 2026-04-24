@@ -142,6 +142,7 @@ struct AXWindowLayoutService {
     }
 
     /// Size for layout decisions (cascade), from AX position and size.
+    /// AX stores the origin in the same space `setFrame` writes via `ScreenGeometry.axPosition` (not CGRect.minY).
     func readFrame(_ win: AXUIElement) -> CGRect? {
         var pos: CFTypeRef?
         var size: CFTypeRef?
@@ -149,7 +150,9 @@ struct AXWindowLayoutService {
               AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &size) == .success,
               let p = valueToPoint(pos),
               let s = valueToSize(size) else { return nil }
-        return CGRect(origin: p, size: s)
+        let screens = NSScreen.screens
+        let menuBar = ScreenGeometry.menuBarScreen(from: screens)?.frame ?? .zero
+        return ScreenGeometry.appKitFrame(axPosition: p, size: s, menuBarScreenFrame: menuBar)
     }
 
     // MARK: - High-level

@@ -118,7 +118,9 @@ final class VibeBridgeServer: ObservableObject {
         if r.ambiguous { return }
         guard let app = r.app else { return }
         lastResolvedApp = app
-        guard let ref = mirror.mainDisplayLayoutFrame(), !ref.isEmpty else { return }
+        let screens = NSScreen.screens
+        guard let ref = mirror.desktopLayoutFrame(screens: screens), !ref.isEmpty else { return }
+        let perScreen = mirror.screenLayoutFrames(screens: screens)
         do {
             let wins = try mirror.windows(for: app)
             // Match iOS/bridge: only windows that get a layout rect (not every AX "window" slot).
@@ -131,6 +133,7 @@ final class VibeBridgeServer: ObservableObject {
                     seq: seq,
                     app: app,
                     ref: ref,
+                    perScreen: perScreen,
                     windows: wins,
                     selectedId: selectedId
                 )
@@ -226,13 +229,13 @@ final class VibeBridgeServer: ObservableObject {
             fail("setWindowRect: Accessibility not granted for VibeWindowManager on the Mac")
             return
         }
-        guard let ref = mirror.mainDisplayLayoutFrame(), !ref.isEmpty else {
-            fail("setWindowRect: could not read main display layout frame")
+        let screens = NSScreen.screens
+        guard let ref = mirror.desktopLayoutFrame(screens: screens), !ref.isEmpty else {
+            fail("setWindowRect: could not read desktop layout frame")
             return
         }
         let global = LayoutMirrorService.denormalize(bridgeRect: rect, to: ref)
         let clamped = Self.clampFrame(global, minW: Self.remoteResizeMinWidth, minH: Self.remoteResizeMinHeight)
-        let screens = NSScreen.screens
         let wins: [ManagedWindow]
         do {
             wins = try mirror.windows(for: app)

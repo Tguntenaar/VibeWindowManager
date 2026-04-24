@@ -49,8 +49,11 @@ The protocol itself does **not** change across paths; discovery only decides the
 
 ### `layout` (server → client)
 
-`reference` is the **main display** layout area used for normalization (after Stage Manager inset when applicable).  
-`windows[].rect` is **normalized 0…1** in **top-left** coordinates (x,y width height) **relative to `reference`**, for drawing in SwiftUI on the phone.
+`reference` is the **desktop union** layout area: the bounding rect of every display's Stage-Manager-adjusted layout frame, in AppKit global coordinates. It is stable — it does not change when focus moves between displays.
+
+`windows[].rect` is **normalized 0…1** in **top-left** coordinates (x,y width height) **relative to `reference`**, for drawing in SwiftUI on the phone. A window on an external display has the same kind of rect as a main-display window; the enclosing `screens[]` entry tells the client which physical display it sits in.
+
+`screens[]` is the list of per-physical-display rects, also normalized 0..1 top-left relative to `reference`. Clients render one outline per entry.
 
 ```json
 {
@@ -58,9 +61,13 @@ The protocol itself does **not** change across paths; discovery only decides the
   "seq": 42,
   "appName": "Ghostty",
   "bundleId": "com.mitchellh.ghostty",
-  "reference": { "x": 0, "y": 0, "width": 1440, "height": 900 },
+  "reference": { "x": 0, "y": 0, "width": 3360, "height": 1080 },
+  "screens": [
+    { "x": 0, "y": 0, "width": 0.4286, "height": 0.8333 },
+    { "x": 0.4286, "y": 0, "width": 0.5714, "height": 1 }
+  ],
   "windows": [
-    { "id": "abc123", "title": "term", "zIndex": 0, "rect": { "x": 0, "y": 0, "width": 0.5, "height": 1 } }
+    { "id": "abc123", "title": "term", "zIndex": 0, "rect": { "x": 0, "y": 0, "width": 0.2143, "height": 0.8333 } }
   ],
   "selectedId": "abc123"
 }
@@ -84,7 +91,7 @@ Focus the next window in **z-order / list order** (server-defined: same order as
 
 ### `setWindowRect` (client → server)
 
-Move or resize a window. `rect` uses the **same normalized top-left convention** as `layout.windows[].rect` (relative to the server’s current `reference` / main-display layout frame). The server applies the frame via Accessibility; on failure it may send an `error` message.
+Move or resize a window. `rect` uses the **same normalized top-left convention** as `layout.windows[].rect` (relative to the server's current `reference` / desktop union). Coordinates outside [0, 1] that still land inside one of the `screens[]` rects move the window to that display. The server applies the frame via Accessibility; on failure it may send an `error` message.
 
 ```json
 {

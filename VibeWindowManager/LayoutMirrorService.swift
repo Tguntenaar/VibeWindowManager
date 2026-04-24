@@ -15,11 +15,30 @@ struct LayoutMirrorService {
     private let ax = AXWindowLayoutService()
 
     /// Single-screen v1: main display’s layout area (Stage Manager–aware).
+    /// Retained for legacy call sites; bridge paths use `desktopLayoutFrame` so the mirror
+    /// coordinate space does not flip when focus moves between displays.
     func mainDisplayLayoutFrame() -> CGRect? {
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return nil }
         let chosen = NSScreen.main ?? ScreenGeometry.menuBarScreen(from: screens) ?? screens[0]
         return ScreenGeometry.layoutFrame(for: chosen, allScreens: screens, isStageManagerEnabled: StageManagerSupport.isEnabled)
+    }
+
+    /// Per-screen Stage-Manager-adjusted layout frames in AppKit global coordinates, matching
+    /// the geometry used to build `desktopLayoutFrame`.
+    func screenLayoutFrames(screens: [NSScreen]) -> [CGRect] {
+        let stage = StageManagerSupport.isEnabled
+        return screens.map {
+            ScreenGeometry.layoutFrame(for: $0, allScreens: screens, isStageManagerEnabled: stage)
+        }
+    }
+
+    /// Union bounding rect of every screen's layout frame — a stable desktop-wide coordinate
+    /// space that does not change when focus moves between displays.
+    func desktopLayoutFrame(screens: [NSScreen]) -> CGRect? {
+        let frames = screenLayoutFrames(screens: screens).filter { !$0.isEmpty }
+        guard let first = frames.first else { return nil }
+        return frames.dropFirst().reduce(first) { $0.union($1) }
     }
 
     /// Windows for the resolved app, front-most first.
@@ -52,11 +71,15 @@ struct LayoutMirrorService {
         }
     }
 
-    /// Build one `layout` message; `ref` is usually `mainDisplayLayoutFrame()`.
+    /// Build one `layout` message; `ref` is usually `desktopLayoutFrame(screens:)` — the union of
+    /// every display's layout frame so coordinates stay stable as focus moves between displays.
+    /// `perScreen` is the list of each physical display's layout frame in the same AppKit global
+    /// space as `ref`; they get normalized against `ref` and emitted as `screens[]`.
     func layoutMessage(
         seq: UInt64,
         app: NSRunningApplication,
         ref: CGRect,
+        perScreen: [CGRect],
         windows: [ManagedWindow],
         selectedId: String?
     ) -> BridgeLayoutMessage? {
@@ -75,6 +98,7 @@ struct LayoutMirrorService {
                 )
             )
         }
+        let screenRects = perScreen.compactMap { Self.normalize(frame: $0, to: ref) }
         return BridgeLayoutMessage(
             seq: seq,
             appName: app.localizedName,
@@ -85,6 +109,7 @@ struct LayoutMirrorService {
                 width: Double(ref.width),
                 height: Double(ref.height)
             ),
+            screens: screenRects,
             windows: items,
             selectedId: selectedId
         )

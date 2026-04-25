@@ -21,7 +21,7 @@ The protocol itself does **not** change across paths; discovery only decides the
 1. Client connects via WebSocket GET `/bridge`.
 2. Server may send a `serverHello` (optional) immediately; client may send `clientHello` after connect.
 3. Server repeatedly pushes `layout` when windows change (throttled, ~5–10/s max).
-4. Client sends `select`, `selectNext`, `setWindowRect`, `ping`, and optional `transcribe` / `ping`.
+4. Client sends `select`, `selectNext`, `setWindowRect`, `ping`, `requestTmuxPane`, and optional `transcribe` / `transcribeLive` (iOS live typing while holding the mic).
 
 ## Message types (JSON `type` field)
 
@@ -109,9 +109,19 @@ Paste **plain text** into the **currently focused** Ghostty window (must match s
 { "type": "pasteText", "text": "hello world" }
 ```
 
+### `transcribeLive` (client → server)
+
+**Optional (iOS):** while the user holds the mic, the client may stream **SFSpeech** partials so the server can type **live** in the selected window. The server keeps the string last injected and, on each message, simulates **Backspace** for each character in the previous string, then **pastes** the new `text` (Cmd+V) so the line updates in place.
+
+```json
+{ "type": "transcribeLive", "text": "interim string from the phone" }
+```
+
+When the utterance **ends** (`transcribe` with `end: true`), the server runs the usual Mac STT on the full PCM and **replaces** the live string with the final transcript, then appends a newline. If the user did not grant iOS speech recognition, only batch `transcribe` is used (no live typing).
+
 ### `transcribe` (client → server)
 
-**v1:** send **raw PCM** as base64 for convenience (16-bit little-endian mono, 16 kHz) in chunks with optional `end` flag. Server runs STT on the Mac and then performs the same as `pasteText` with the result.
+**v1:** send **raw PCM** as base64 for convenience (16-bit little-endian mono, 16 kHz) in chunks with optional `end` flag. After `end: true`, the server runs local STT (e.g. Whisper) and **replaces** any `transcribeLive` text in the target with the final transcript, then appends a **newline** for terminal targets (as if the user pressed Enter). If no live typing occurred, the server pastes the transcript + newline the same as `pasteText` would.
 
 **Chunk:**
 
@@ -138,6 +148,33 @@ If STT is not installed, `error` is set and `text` is empty.
 ```json
 { "type": "error", "message": "Accessibility not granted" }
 ```
+
+### `requestTmuxPane` (client → server)
+
+Ask the server to read text from a **tmux** pane. The Mac app runs `tmux capture-pane` for the **tmux target** configured in the Mac UI (e.g. `session:0.0`). The shell must be running **inside tmux** on the Mac; see README.
+
+- `lines` (optional, positive): include at most this many **tail** lines (scrollback + visible), after byte limits. Omitted or invalid defaults to **400** on the server.
+
+```json
+{ "type": "requestTmuxPane", "lines": 400 }
+```
+
+### `tmuxPane` (server → client)
+
+**Response** to `requestTmuxPane`. If capture failed, `error` is set and `text` is empty.
+
+```json
+{
+  "type": "tmuxPane",
+  "seq": 1,
+  "text": "line1\nline2",
+  "error": null,
+  "truncated": false
+}
+```
+
+- `seq` monotonically increases per successful capture send (server).
+- `truncated` is true if output was clipped (line cap or a server byte cap, e.g. 256 KiB).
 
 ## Security (LAN)
 

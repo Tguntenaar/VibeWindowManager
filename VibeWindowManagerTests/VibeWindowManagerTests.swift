@@ -273,3 +273,53 @@ struct LayoutMirrorNormalizeTests {
         #expect(abs(nExtScreen.y - 0) < 1e-6)
     }
 }
+
+struct TmuxPaneCaptureTests {
+    @Test func applyLineLimitKeepsTailLines() {
+        let raw = "a\nb\nc\nd\ne"
+        let (t, trunc) = TmuxPaneCapture.applyLineAndByteLimits(raw, lineLimit: 2)
+        #expect(t == "d\ne")
+        #expect(trunc == true)
+    }
+
+    @Test func applyLineLimitNoTruncationWhenFits() {
+        let raw = "a\nb"
+        let (t, trunc) = TmuxPaneCapture.applyLineAndByteLimits(raw, lineLimit: 10)
+        #expect(t == "a\nb")
+        #expect(trunc == false)
+    }
+
+    @Test func utf8ByteSuffixAsciiTail() {
+        let s = String(repeating: "a", count: 500) + "ENDMARK"
+        let (out, trunc) = TmuxPaneCapture.utf8ByteSuffix(s, maxBytes: 12)
+        #expect(trunc == true)
+        #expect(out.utf8.count <= 12)
+        #expect(out.hasSuffix("RK") || out.hasSuffix("MARK"))
+    }
+
+    @Test func decodeClientMessageRequestTmuxPane() throws {
+        let json = #"{"type":"requestTmuxPane","lines":200}"#
+        let any = try decodeClientMessage(from: json)
+        let r = any as? BridgeRequestTmuxPane
+        #expect(r != nil)
+        #expect(r?.lines == 200)
+    }
+
+    @Test func decodeClientMessageTranscribeChunk() throws {
+        let json = #"{"type":"transcribe","format":"pcm_s16le_16000","base64":"qqo=","end":false}"#
+        let any = try decodeClientMessage(from: json)
+        let r = any as? BridgeTranscribe
+        #expect(r != nil)
+        #expect(r?.format == "pcm_s16le_16000")
+        #expect(r?.end == false)
+        #expect(r?.base64 == "qqo=")
+    }
+
+    @Test func decodeClientMessageTranscribeLive() throws {
+        let json = #"{"type":"transcribeLive","text":"hello world"}"#
+        let any = try decodeClientMessage(from: json)
+        let r = any as? BridgeTranscribeLive
+        #expect(r != nil)
+        #expect(r?.text == "hello world")
+    }
+}

@@ -15,14 +15,18 @@ v1 targets a **trusted network** (home/small office). For hardening, treat futur
 
 - **macOS** with a recent **Xcode** (open `VibeWindowManager.xcodeproj`).
 - For Ghostty- or app-specific features, have those apps installed as needed.
-- For **Tailnet auto-connect** from iOS, **Tailscale** on the Mac (CLI or app) so the bridge UI can show this machine’s **MagicDNS** hostname; iOS still works with **Bonjour-only** on the same Wi‑Fi if you do not use Tailscale.
+- For **Tailnet** from iOS, run **Tailscale** on the Mac (CLI or app) so the bridge UI can show this machine’s **MagicDNS** hostname. The iOS app connects with that hostname or with **manual `IP:port`**; it does not use Bonjour. The Mac still advertises `_vibewm._tcp` for other use.
 
 ## Quick start (bridge + iOS)
 
 1. Open the project in Xcode, build, and run the **VibeWindowManager** app.
 2. Turn on the **iOS layout bridge** in the app (default app query, port `19842`).
-3. On your iPhone or iPad, install and run **[VibeWindowManagerIOS](https://github.com/Tguntenaar/VibeWindowManagerIOS)**. Connect via Tailnet, Bonjour, or manual `IP:19842`.
+3. On your iPhone or iPad, install and run **[VibeWindowManagerIOS](https://github.com/Tguntenaar/VibeWindowManagerIOS)**. Connect with **Connect via Tailnet** (MagicDNS name) or **manual** `100.x.x.x:19842` / LAN `IP:19842`.
 4. Grant **local network** access on iOS if the system prompt appears.
+
+### tmux buffer on iPad (optional)
+
+To **read terminal text** on the phone/tablet (not just window outlines), run your shell **inside tmux** on the Mac (e.g. Ghostty → `tmux new -s dev`). In the Mac Vibe app, set **tmux target** to a pane spec that `tmux list-panes -a` would accept (examples: `dev`, `dev:0.0`, `0`). On iOS, while mirroring, open the **tmux** button (text icon): **Refresh** fetches a snapshot; **Auto (2s)** polls the Mac. The server runs `tmux capture-pane` with your line/byte limits (see `docs/PROTOCOL.md`).
 
 `windows bridge-dump <app>` prints the same `layout` JSON the bridge sends (useful for debugging).
 

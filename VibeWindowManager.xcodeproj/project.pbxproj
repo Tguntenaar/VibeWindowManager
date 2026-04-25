@@ -403,6 +403,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "VibeWindowManager needs Accessibility to move and resize other apps’ windows (tile, cascade).";
+				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "VibeWindowManager needs Screen Recording to send live per-window screen previews to the iPad. Allow it for this app in System Settings if prompted.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -435,6 +436,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "VibeWindowManager needs Accessibility to move and resize other apps’ windows (tile, cascade).";
+				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "VibeWindowManager needs Screen Recording to send live per-window screen previews to the iPad. Allow it for this app in System Settings if prompted.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

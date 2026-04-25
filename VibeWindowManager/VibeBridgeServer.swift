@@ -21,6 +21,10 @@ final class VibeBridgeServer: ObservableObject {
     @Published var serviceName: String = Host.current().localizedName ?? "VibeWindowManager"
     /// App query (e.g. `ghostty`) for listing windows.
     @Published var appQuery: String = "ghostty"
+    /// tmux target for `capture-pane -t` (e.g. `0` or `dev:0.0`); see README / PROTOCOL.
+    @Published var tmuxTarget: String = UserDefaults.standard.string(forKey: "vibeBridgeTmuxTarget") ?? "" {
+        didSet { UserDefaults.standard.set(tmuxTarget, forKey: "vibeBridgeTmuxTarget") }
+    }
 
     private var listener: NWListener?
     private var connections: [UUID: VibeWireConnection] = [:]
@@ -35,12 +39,33 @@ final class VibeBridgeServer: ObservableObject {
     private let decoder = JSONDecoder()
     private let mirror = LayoutMirrorService()
     private var axService = AXWindowLayoutService()
-    private let stt = VibeSTTService()
+    private var transcribePcmBuffer = Data()
     private var lastLayoutJSON: String?
+    private var tmuxSeq: UInt64 = 0
+    private var lastTmuxTextForDedupe: String?
+
+    private var lastMirrorAppListJSON: String?
+    private var lastMirrorAppListFingerprint: String = ""
+    private var mirrorAppListSeq: UInt64 = 0
+
+    private var clientWantsWindowStream: Bool = false
+    private var windowStreamRR: Int = 0
+    private var windowStreamOutSeq: UInt64 = 0
+    private var windowStreamInFlight: Bool = false
+    private static let windowStreamMaxW: CGFloat = 1120
+    private static let windowStreamJPEGQ: Double = 0.58
 
     private var selectedId: String?
     private var lastWindows: [ManagedWindow] = []
     private var lastResolvedApp: NSRunningApplication?
+    /// What we last committed on the Mac from `transcribeLive` (only updated after a `runLiveReplace` completion).
+    private var lastMacLiveText: String = ""
+    /// Latest string from the phone; we apply `liveWanted` until it matches `lastMacLiveText`.
+    private var liveWanted: String?
+    /// True from `doOneLiveReplace` until the `runLiveReplace` completion runs.
+    private var liveReplaceInFlight: Bool = false
+    private var liveSessionPrimed: Bool = false
+    private var livePrimeWork: DispatchWorkItem?
 
     func start() {
         guard !isRunning else { return }
@@ -104,6 +129,7 @@ final class VibeBridgeServer: ObservableObject {
         let t = Timer.scheduledTimer(withTimeInterval: 1.0 / 6.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.pushLayoutIfNeeded()
+                self?.pushWindowStreamIfNeeded()
             }
         }
         RunLoop.main.add(t, forMode: .common)
@@ -111,6 +137,7 @@ final class VibeBridgeServer: ObservableObject {
     }
 
     private func pushLayoutIfNeeded() {
+        pushMirrorAppListIfNeeded()
         axService = AXWindowLayoutService()
         guard axService.isProcessTrusted else { return }
         let apps = AppQueryResolver.runningRegularApps()
@@ -162,8 +189,12 @@ final class VibeBridgeServer: ObservableObject {
         wire.start()
         if let d = try? encoder.encode(BridgeServerHello(version: 1, port: Self.defaultPort)),
             let s = String(data: d, encoding: .utf8) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak wire] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak wire] in
                 wire?.sendJSONText(s)
+                guard let self else { return }
+                // New clients need `mirrorAppList` even if the set of PIDs is unchanged.
+                self.lastMirrorAppListJSON = nil
+                self.pushMirrorAppListIfNeeded()
             }
         }
     }
@@ -199,6 +230,10 @@ final class VibeBridgeServer: ObservableObject {
             }
         case BridgeMessageType.transcribe.rawValue:
             runTranscribe(data: data)
+        case BridgeMessageType.transcribeLive.rawValue:
+            if let m = try? decoder.decode(BridgeTranscribeLive.self, from: data) {
+                runTranscribeLive(m.text)
+            }
         case BridgeMessageType.setWindowRect.rawValue:
             do {
                 let msg = try decoder.decode(BridgeSetWindowRect.self, from: data)
@@ -208,8 +243,149 @@ final class VibeBridgeServer: ObservableObject {
                 lastError = msg
                 sendToAllConnections(BridgeErrorMessage(message: msg))
             }
+        case BridgeMessageType.requestTmuxPane.rawValue:
+            do {
+                let msg = try decoder.decode(BridgeRequestTmuxPane.self, from: data)
+                runRequestTmuxPane(requestedLines: msg.lines)
+            } catch {
+                let msg = "requestTmuxPane JSON: \(error.localizedDescription)"
+                lastError = msg
+                sendToAllConnections(BridgeErrorMessage(message: msg))
+            }
+        case BridgeMessageType.setMirrorAppQuery.rawValue:
+            if let msg = try? decoder.decode(BridgeSetMirrorAppQuery.self, from: data) {
+                let id = msg.bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !id.isEmpty {
+                    appQuery = id
+                    lastLayoutJSON = nil
+                    selectedId = nil
+                    lastWindows = []
+                }
+            }
+        case BridgeMessageType.setWindowStreamEnabled.rawValue:
+            if let m = try? decoder.decode(BridgeSetWindowStreamEnabled.self, from: data) {
+                clientWantsWindowStream = m.enabled
+                if !m.enabled { windowStreamInFlight = false }
+            }
         default:
             break
+        }
+    }
+
+    private func pushWindowStreamIfNeeded() {
+        guard clientWantsWindowStream, !connections.isEmpty, !lastWindows.isEmpty, !windowStreamInFlight else { return }
+        let n = lastWindows.count
+        let idx = windowStreamRR % n
+        windowStreamRR &+= 1
+        let wid = lastWindows[idx].id
+        windowStreamInFlight = true
+        let maxW = Self.windowStreamMaxW
+        let q = Self.windowStreamJPEGQ
+        Task.detached(priority: .userInitiated) {
+            let (jpeg, err) = WindowStreamCapture.captureJPEG(bridgeWindowId: wid, maxWidth: maxW, quality: q)
+            let b64: String? = jpeg.map { $0.base64EncodedString() }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.windowStreamInFlight = false
+                guard self.clientWantsWindowStream, !self.connections.isEmpty else { return }
+                self.windowStreamOutSeq &+= 1
+                let msg = BridgeWindowStreamMessage(
+                    seq: self.windowStreamOutSeq,
+                    windowId: wid,
+                    format: "jpeg",
+                    base64: b64,
+                    error: err
+                )
+                guard let d = try? self.encoder.encode(msg), let s = String(data: d, encoding: .utf8) else { return }
+                self.broadcast(s)
+            }
+        }
+    }
+
+    private static let mirrorListSkipBundleIds: Set<String> = [
+        "com.thomasguntenaar.VibeWindowManager",
+    ]
+
+    private func runningAppsForMirrorList() -> [NSRunningApplication] {
+        AppQueryResolver.runningRegularApps().filter { app in
+            app.bundleIdentifier.map { !Self.mirrorListSkipBundleIds.contains($0) } ?? true
+        }
+    }
+
+    private static func mirrorIconPNG48Base64(for app: NSRunningApplication) -> String? {
+        guard let src = app.icon else { return nil }
+        let s = NSSize(width: 48, height: 48)
+        let img = NSImage(size: s)
+        img.lockFocus()
+        src.draw(in: NSRect(origin: .zero, size: s), from: .zero, operation: .copy, fraction: 1.0)
+        img.unlockFocus()
+        guard let tiff = img.tiffRepresentation,
+            let rep = NSBitmapImageRep(data: tiff)
+        else { return nil }
+        guard let png = rep.representation(using: .png, properties: [:]) else { return nil }
+        return png.base64EncodedString()
+    }
+
+    private func pushMirrorAppListIfNeeded() {
+        let apps = runningAppsForMirrorList()
+        let fp = apps.map { "\($0.processIdentifier)" }.sorted().joined(separator: ",")
+        let needRebuild = (fp != lastMirrorAppListFingerprint) || (lastMirrorAppListJSON == nil)
+        if !needRebuild { return }
+        lastMirrorAppListFingerprint = fp
+        var items: [BridgeMirrorAppEntry] = []
+        items.reserveCapacity(apps.count)
+        for a in apps {
+            let name = a.localizedName ?? "App"
+            let bid = a.bundleIdentifier ?? "\(a.processIdentifier)"
+            let ico = Self.mirrorIconPNG48Base64(for: a)
+            items.append(BridgeMirrorAppEntry(name: name, bundleId: bid, iconPNGBase64: ico))
+        }
+        let msg = BridgeMirrorAppListMessage(seq: mirrorAppListSeq, apps: items)
+        mirrorAppListSeq &+= 1
+        guard let data = try? encoder.encode(msg), let json = String(data: data, encoding: .utf8) else { return }
+        if json == lastMirrorAppListJSON { return }
+        lastMirrorAppListJSON = json
+        broadcast(json)
+    }
+
+    private func runRequestTmuxPane(requestedLines: Int?) {
+        let target = tmuxTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        if target.isEmpty {
+            tmuxSeq &+= 1
+            sendToAllConnections(
+                BridgeTmuxPaneMessage(
+                    seq: tmuxSeq,
+                    text: "",
+                    error: "tmux target not configured (set it in the Mac app)",
+                    truncated: false
+                )
+            )
+            return
+        }
+        var lineLimit = TmuxPaneCapture.defaultLineLimit
+        if let l = requestedLines, l > 0 {
+            lineLimit = min(l, TmuxPaneCapture.maxLineLimit)
+        }
+        Task {
+            let result = await TmuxPaneCapture.capturePane(target: target, lineLimit: lineLimit)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if result.error == nil, !result.text.isEmpty, result.text == self.lastTmuxTextForDedupe {
+                    return
+                }
+                if result.error == nil {
+                    self.lastTmuxTextForDedupe = result.text.isEmpty ? nil : result.text
+                }
+                self.tmuxSeq &+= 1
+                self.sendToAllConnections(
+                    BridgeTmuxPaneMessage(
+                        seq: self.tmuxSeq,
+                        text: result.text,
+                        error: result.error,
+                        truncated: result.truncated
+                    )
+                )
+            }
         }
     }
 
@@ -300,12 +476,156 @@ final class VibeBridgeServer: ObservableObject {
         } catch { lastError = error.localizedDescription }
     }
 
+    private func runTranscribeLive(_ text: String) {
+        if text == lastMacLiveText, !liveReplaceInFlight, livePrimeWork == nil { return }
+        liveWanted = text
+        startLiveApplyIfIdle()
+    }
+
+    private func startLiveApplyIfIdle() {
+        guard !liveReplaceInFlight, livePrimeWork == nil, let want = liveWanted, want != lastMacLiveText else { return }
+        guard let app = lastResolvedApp,
+              let w = lastWindows.first(where: { $0.id == (selectedId ?? "") }) ?? lastWindows.first
+        else { return }
+        do {
+            try VibeFocusPaster.focus(window: w, app: app)
+        } catch {
+            lastError = error.localizedDescription
+            return
+        }
+        if !liveSessionPrimed {
+            liveSessionPrimed = true
+            let item = DispatchWorkItem { [weak self] in
+                self?.livePrimeWork = nil
+                self?.doOneLiveReplace()
+            }
+            livePrimeWork = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
+        } else {
+            doOneLiveReplace()
+        }
+    }
+
+    private func doOneLiveReplace() {
+        liveReplaceInFlight = true
+        guard let want = liveWanted, want != lastMacLiveText else {
+            liveReplaceInFlight = false
+            startLiveApplyIfIdle()
+            return
+        }
+        let prev = lastMacLiveText
+        VibeFocusPaster.runLiveReplace(previous: prev, new: want) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // Always match `lastMacLiveText` to the string we just installed; skipping here desyncs
+                // the next backspace+paste and produces interleaved text (e.g. "It'It's …").
+                self.lastMacLiveText = want
+                self.liveReplaceInFlight = false
+                if self.liveWanted != nil {
+                    self.startLiveApplyIfIdle()
+                }
+            }
+        }
+    }
+
+    private func clearOnMacIfLive() {
+        guard !lastMacLiveText.isEmpty,
+              let app = lastResolvedApp,
+              let w = lastWindows.first(where: { $0.id == (selectedId ?? "") }) ?? lastWindows.first
+        else { return }
+        let prev = lastMacLiveText
+        do {
+            try VibeFocusPaster.focus(window: w, app: app)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                VibeFocusPaster.runLiveReplace(previous: prev, new: "") {
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        if self.lastMacLiveText == prev { self.lastMacLiveText = "" }
+                    }
+                }
+            }
+        } catch { lastError = error.localizedDescription }
+    }
+
+    private func runFinalOrClearAfterTranscribe(sttText: String, sttError: String?) {
+        if liveReplaceInFlight {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.runFinalOrClearAfterTranscribe(sttText: sttText, sttError: sttError)
+            }
+            return
+        }
+        livePrimeWork?.cancel()
+        livePrimeWork = nil
+        liveSessionPrimed = false
+        liveWanted = nil
+        if let e = sttError, !e.isEmpty {
+            if e.hasPrefix("STT:") { lastError = e }
+            clearOnMacIfLive()
+            lastMacLiveText = ""
+            return
+        }
+        if sttText.isEmpty {
+            clearOnMacIfLive()
+            lastMacLiveText = ""
+            return
+        }
+        guard let app = lastResolvedApp,
+              let w = lastWindows.first(where: { $0.id == (selectedId ?? "") }) ?? lastWindows.first
+        else { return }
+        do {
+            try VibeFocusPaster.focus(window: w, app: app)
+            let prev = lastMacLiveText
+            lastMacLiveText = ""
+            let final = sttText + "\n"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                VibeFocusPaster.runLiveReplace(previous: prev, new: final)
+            }
+        } catch { lastError = error.localizedDescription }
+    }
+
+    /// Clears live-transcribe state and notifies the client that no audio was captured.
+    private func finishTranscribeEmptyPcm() {
+        if liveReplaceInFlight {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.finishTranscribeEmptyPcm()
+            }
+            return
+        }
+        livePrimeWork?.cancel()
+        livePrimeWork = nil
+        liveSessionPrimed = false
+        liveWanted = nil
+        clearOnMacIfLive()
+        lastMacLiveText = ""
+        sendToAllConnections(BridgeTranscribeResult(text: "", error: "No audio captured."))
+    }
+
     private func runTranscribe(data: Data) {
         do {
             let tr = try decoder.decode(BridgeTranscribe.self, from: data)
-            if let (text, err) = stt.process(base64: tr.base64, end: tr.end) {
-                sendToAllConnections(BridgeTranscribeResult(text: text, error: err))
-                if err == nil, !text.isEmpty { runPaste(text) }
+            if !tr.base64.isEmpty, let chunk = Data(base64Encoded: tr.base64) {
+                transcribePcmBuffer.append(chunk)
+            }
+            if !tr.end { return }
+            let pcm = transcribePcmBuffer
+            transcribePcmBuffer.removeAll(keepingCapacity: true)
+            if pcm.isEmpty {
+                if liveReplaceInFlight {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                        self?.finishTranscribeEmptyPcm()
+                    }
+                    return
+                }
+                finishTranscribeEmptyPcm()
+                return
+            }
+            Task {
+                let (text, err) = await VibeSTTService.transcribePcmS16leMono16k(pcm: pcm)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.sendToAllConnections(BridgeTranscribeResult(text: text, error: err))
+                    self.runFinalOrClearAfterTranscribe(sttText: text, sttError: err)
+                }
             }
         } catch {
             sendToAllConnections(BridgeTranscribeResult(text: "", error: error.localizedDescription))

@@ -19,9 +19,16 @@ enum BridgeMessageType: String, Codable {
     case selectNext
     case pasteText
     case transcribe
+    case transcribeLive
     case transcribeResult
     case error
     case setWindowRect
+    case requestTmuxPane
+    case tmuxPane
+    case mirrorAppList
+    case setMirrorAppQuery
+    case windowStream
+    case setWindowStreamEnabled
 }
 
 // MARK: - Outgoing (server)
@@ -73,6 +80,37 @@ struct BridgeTranscribeResult: Codable {
     var error: String?
 }
 
+struct BridgeTmuxPaneMessage: Codable {
+    var type: String = BridgeMessageType.tmuxPane.rawValue
+    var seq: UInt64
+    var text: String
+    var error: String?
+    var truncated: Bool
+}
+
+struct BridgeMirrorAppEntry: Codable, Equatable {
+    var name: String
+    var bundleId: String
+    /// Optional 48×48 PNG, base64 (no data: prefix), for the iOS grid.
+    var iconPNGBase64: String?
+}
+
+struct BridgeMirrorAppListMessage: Codable, Equatable {
+    var type: String = BridgeMessageType.mirrorAppList.rawValue
+    var seq: UInt64
+    var apps: [BridgeMirrorAppEntry]
+}
+
+struct BridgeWindowStreamMessage: Codable, Equatable {
+    var type: String = BridgeMessageType.windowStream.rawValue
+    var seq: UInt64
+    var windowId: String
+    /// Wire format, e.g. `jpeg` (from `screencapture` + optional downscale on the Mac).
+    var format: String
+    var base64: String?
+    var error: String?
+}
+
 // MARK: - Incoming (client)
 
 struct BridgeClientHello: Codable {
@@ -113,6 +151,27 @@ struct BridgeTranscribe: Codable {
     var end: Bool
 }
 
+/// iOS SFSpeech partials while holding the mic: server replaces the previous in-place (backspace + paste) for live typing.
+struct BridgeTranscribeLive: Codable {
+    var type: String
+    var text: String
+}
+
+struct BridgeRequestTmuxPane: Codable {
+    var type: String
+    var lines: Int?
+}
+
+struct BridgeSetMirrorAppQuery: Codable {
+    var type: String = BridgeMessageType.setMirrorAppQuery.rawValue
+    var bundleId: String
+}
+
+struct BridgeSetWindowStreamEnabled: Codable {
+    var type: String = BridgeMessageType.setWindowStreamEnabled.rawValue
+    var enabled: Bool
+}
+
 // MARK: - Decode helper
 
 enum BridgeJSONDecodeError: Error {
@@ -137,8 +196,16 @@ func decodeClientMessage(from string: String) throws -> Any {
         return try decoder.decode(BridgePasteText.self, from: data)
     case BridgeMessageType.transcribe.rawValue:
         return try decoder.decode(BridgeTranscribe.self, from: data)
+    case BridgeMessageType.transcribeLive.rawValue:
+        return try decoder.decode(BridgeTranscribeLive.self, from: data)
     case BridgeMessageType.setWindowRect.rawValue:
         return try decoder.decode(BridgeSetWindowRect.self, from: data)
+    case BridgeMessageType.requestTmuxPane.rawValue:
+        return try decoder.decode(BridgeRequestTmuxPane.self, from: data)
+    case BridgeMessageType.setMirrorAppQuery.rawValue:
+        return try decoder.decode(BridgeSetMirrorAppQuery.self, from: data)
+    case BridgeMessageType.setWindowStreamEnabled.rawValue:
+        return try decoder.decode(BridgeSetWindowStreamEnabled.self, from: data)
     default:
         throw BridgeJSONDecodeError.unknownType(type)
     }

@@ -15,6 +15,19 @@ struct AppQueryResolution: Sendable {
 }
 
 enum AppQueryResolver {
+    /// Short token for fuzzy `resolve` and bridge UI; same rules as the Mac "Mirror app" icon row.
+    static func bridgeQueryToken(for app: NSRunningApplication) -> String {
+        if let bid = app.bundleIdentifier {
+            let parts = bid.split(separator: ".")
+            if let last = parts.last, !last.isEmpty {
+                return String(last)
+            }
+        }
+        return (app.localizedName ?? "app")
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+    }
+
     static func runningRegularApps() -> [NSRunningApplication] {
         NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular }

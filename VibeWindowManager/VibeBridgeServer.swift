@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import ApplicationServices
 import Combine
 import Foundation
 import Network
@@ -52,11 +53,14 @@ final class VibeBridgeServer: ObservableObject {
     private var windowStreamRR: Int = 0
     private var windowStreamOutSeq: UInt64 = 0
     private var windowStreamInFlight: Bool = false
+    /// Last `screencapture` bitmap size (pre-downscale) per window; iOS `nx,ny` are 0…1 in this aspect; can exceed `kCGWindowBounds` (e.g. shadow).
+    private var lastStreamFullPixelSize: [String: CGSize] = [:]
     private static let windowStreamMaxW: CGFloat = 1120
     private static let windowStreamJPEGQ: Double = 0.58
 
     private var selectedId: String?
     private var lastWindows: [ManagedWindow] = []
+    private var streamCalibration: VibeStreamCalibrationManager?
     private var lastResolvedApp: NSRunningApplication?
     /// What we last committed on the Mac from `transcribeLive` (only updated after a `runLiveReplace` completion).
     private var lastMacLiveText: String = ""
@@ -114,6 +118,9 @@ final class VibeBridgeServer: ObservableObject {
     }
 
     func stop() {
+        streamCalibration?.hide()
+        streamCalibration = nil
+        lastLayoutJSON = nil
         layoutTimer?.invalidate()
         layoutTimer = nil
         for c in connections.values { c.cancel() }
@@ -149,9 +156,24 @@ final class VibeBridgeServer: ObservableObject {
         guard let ref = mirror.desktopLayoutFrame(screens: screens), !ref.isEmpty else { return }
         let perScreen = mirror.screenLayoutFrames(screens: screens)
         do {
+            var extra: [ManagedWindow] = []
+            if let c = streamCalibration, c.isActive {
+                try? c.refreshManaged(using: axService)
+                if let m = c.managed { extra = [m] }
+            }
             let wins = try mirror.windows(for: app)
+            var merged: [ManagedWindow] = {
+                if extra.isEmpty { return wins }
+                var seen = Set(wins.map(\.id))
+                var a = wins
+                for w in extra where !seen.contains(w.id) {
+                    a.append(w)
+                    seen.insert(w.id)
+                }
+                return a
+            }()
             // Match iOS/bridge: only windows that get a layout rect (not every AX "window" slot).
-            let inLayout = LayoutMirrorService.windowsInLayoutRef(wins, ref: ref)
+            let inLayout = LayoutMirrorService.windowsInLayoutRef(merged, ref: ref)
             lastWindows = inLayout
             if let sid = selectedId, !inLayout.contains(where: { $0.id == sid }) { selectedId = inLayout.first?.id }
             if selectedId == nil { selectedId = inLayout.first?.id }
@@ -162,17 +184,54 @@ final class VibeBridgeServer: ObservableObject {
                     ref: ref,
                     perScreen: perScreen,
                     windows: wins,
+                    additionalWindows: extra,
                     selectedId: selectedId
                 )
             else { return }
             seq &+= 1
             guard let data = try? encoder.encode(msg), let json = String(data: data, encoding: .utf8) else { return }
-            if json == lastLayoutJSON { return }
-            lastLayoutJSON = json
-            broadcast(json)
+            if json != lastLayoutJSON {
+                lastLayoutJSON = json
+                broadcast(json)
+            }
         } catch {
             lastError = error.localizedDescription
         }
+        tryPushCalibrationMessage()
+    }
+
+    private func tryPushCalibrationMessage() {
+        guard let c = streamCalibration, c.isActive, !c.didBroadcastTarget else { return }
+        guard let mw = c.managed, let ex = c.expectedBitmapFraction(ax: axService) else { return }
+        let m = BridgeCalibrationTargetMessage(
+            windowId: mw.id,
+            expectNx: ex.nx,
+            expectNy: ex.ny,
+            sampleCount: c.sampleCount,
+            sampleIndex: c.currentPresentationIndex
+        )
+        guard let d = try? encoder.encode(m), let s = String(data: d, encoding: .utf8) else { return }
+        c.didBroadcastTarget = true
+        selectedId = mw.id
+        lastLayoutJSON = nil
+        broadcast(s)
+    }
+
+    private func runOpenCalibrationTarget() {
+        if streamCalibration == nil { streamCalibration = VibeStreamCalibrationManager() }
+        if let c = streamCalibration {
+            c.onRequestClose = { [weak self] in
+                self?.runCloseCalibrationTarget()
+            }
+        }
+        streamCalibration?.show()
+        lastLayoutJSON = nil
+    }
+
+    private func runCloseCalibrationTarget() {
+        streamCalibration?.hide()
+        streamCalibration = nil
+        lastLayoutJSON = nil
     }
 
     private func adopt(_ c: NWConnection) {
@@ -267,8 +326,140 @@ final class VibeBridgeServer: ObservableObject {
                 clientWantsWindowStream = m.enabled
                 if !m.enabled { windowStreamInFlight = false }
             }
+        case BridgeMessageType.windowStreamClick.rawValue:
+            if let m = try? decoder.decode(BridgeWindowStreamClick.self, from: data) {
+                // #region agent log
+                VibeAgentDebugLog.append(
+                    hypothesisId: "H3",
+                    location: "VibeBridgeServer.handleClientJSON:windowStreamClick",
+                    message: "wire nx/ny as decoded from iPad",
+                    data: ["windowId": m.windowId, "nx": m.nx, "ny": m.ny]
+                )
+                // #endregion
+                runWindowStreamClick(windowId: m.windowId, nx: m.nx, ny: m.ny)
+            }
+        case BridgeMessageType.openCalibrationTarget.rawValue:
+            if (try? decoder.decode(BridgeClientOpenCalibration.self, from: data)) != nil {
+                runOpenCalibrationTarget()
+            }
+        case BridgeMessageType.closeCalibrationTarget.rawValue:
+            if (try? decoder.decode(BridgeClientCloseCalibration.self, from: data)) != nil {
+                runCloseCalibrationTarget()
+            }
         default:
             break
+        }
+    }
+
+    /// AppKit window frames / CG window bounds use **points**; screencapture JPEG pixel size must be divided by this.
+    private static func screenBackingScale(containing p: CGPoint) -> CGFloat {
+        for s in NSScreen.screens {
+            if s.frame.contains(p) { return s.backingScaleFactor }
+        }
+        return NSScreen.main?.backingScaleFactor ?? 2.0
+    }
+
+    private func runWindowStreamClick(windowId: String, nx: Double, ny: Double) {
+        if let c = streamCalibration, c.isActive {
+            try? c.refreshManaged(using: axService)
+            let isCalWindow =
+                c.managed?.id == windowId
+                || lastWindows.contains(where: { $0.id == windowId && $0.title == VibeStreamCalibrationManager.title })
+            if isCalWindow {
+                // #region agent log
+                VibeAgentDebugLog.append(
+                    hypothesisId: "H_cal",
+                    location: "VibeBridgeServer.runWindowStreamClick:calibrationAdvance",
+                    message: "cal window tap; no synthetic click to desktop",
+                    data: ["windowId": windowId, "wireNx": nx, "wireNy": ny]
+                )
+                // #endregion
+                c.advanceToNextTargetAfterIpadSample()
+                lastLayoutJSON = nil
+                tryPushCalibrationMessage()
+                return
+            }
+        }
+        guard let w = lastWindows.first(where: { $0.id == windowId }) else { return }
+        // Each layout window may belong to a different app (e.g. mirrored Ghostty + bridge “Click calibration”).
+        // Activating `lastResolvedApp` only was wrong for merged windows: clicks never hit the intended surface.
+        let owningApp: NSRunningApplication
+        var pid: pid_t = 0
+        if AXUIElementGetPid(w.element, &pid) == .success, let a = NSRunningApplication(processIdentifier: pid) {
+            owningApp = a
+        } else if let fallback = lastResolvedApp {
+            owningApp = fallback
+        } else {
+            return
+        }
+        do {
+            try VibeFocusPaster.focus(window: w, app: owningApp)
+        } catch {
+            lastError = error.localizedDescription
+            return
+        }
+        selectedId = windowId
+        let nx2 = min(1, max(0, nx))
+        let ny2 = min(1, max(0, ny))
+        let axFrame = axService.readFrame(w.element)
+        let winCgId = WindowStreamCapture.cgWindowID(fromBridgeWindowId: windowId)
+        let boundsFromCG: CGRect? = winCgId.flatMap { WindowStreamCapture.globalBoundsForStreamClickMapping(cgWindowID: $0) }
+        guard var frame = boundsFromCG ?? axFrame else { return }
+        var mapSource = boundsFromCG != nil ? "cgWindow" : "ax"
+        var halfOutsetX: CGFloat = 0
+        var dHeightAnchorDown: CGFloat = 0
+        if let ps = lastStreamFullPixelSize[windowId] {
+            // `ps` is **device pixel** size of the screencapture JPEG. `frame` (CG/AX) is in **AppKit points**.
+            // Comparing pixels to points (or mixing `ps.width` into `frame.origin`) skews Y/X on Retina and
+            // can shove the mapped point off-screen — no cyan ring, clicks “too high” / on the wrong edge.
+            let scale = Self.screenBackingScale(containing: CGPoint(x: frame.midX, y: frame.midY))
+            let wPts = CGFloat(ps.width) / scale
+            let hPts = CGFloat(ps.height) / scale
+            let dW = wPts - frame.width
+            let dH = hPts - frame.height
+            // Small positive deltas: shadow / border around the window in the capture vs CG bounds.
+            if dW > 0.5 {
+                halfOutsetX = dW / 2
+                frame.origin.x = frame.midX - wPts / 2
+                frame.size.width = wPts
+            }
+            if dH > 0.5 {
+                dHeightAnchorDown = dH
+                let top = frame.maxY
+                frame.size.height = hPts
+                frame.origin.y = top - frame.height
+            }
+            if dW > 0.5 || dH > 0.5 {
+                mapSource = boundsFromCG != nil ? "cgWindow+bitmapSize" : "ax+bitmapSize"
+            }
+        }
+        let x = frame.minX + nx2 * frame.width
+        let y = frame.maxY - ny2 * frame.height
+        let point = CGPoint(x: x, y: y)
+        // #region agent log
+        let scr = NSScreen.screens.first { NSPointInRect(point, $0.frame) } ?? NSScreen.main
+        let psw = lastStreamFullPixelSize[windowId].map { Double($0.width) } ?? 0
+        let psh = lastStreamFullPixelSize[windowId].map { Double($0.height) } ?? 0
+        VibeAgentDebugLog.append(
+            hypothesisId: "H1_H2",
+            location: "VibeBridgeServer.runWindowStreamClick:mappedPoint",
+            message: "readFrame vs CGWindow for stream click mapping",
+            data: [
+                "windowId": windowId, "title": w.title, "mapSource": mapSource,
+                "fullPixelW": psw, "fullPixelH": psh, "outsetHalfX": Double(halfOutsetX), "heightGrowDown": Double(dHeightAnchorDown),
+                "wireNx": nx, "wireNy": ny, "clampedNx": nx2, "clampedNy": ny2,
+                "frameMinX": frame.minX, "frameMinY": frame.minY, "frameW": frame.width, "frameH": frame.height, "frameMaxY": frame.maxY,
+                "axFrameW": axFrame.map { Double($0.width) } ?? 0, "axFrameH": axFrame.map { Double($0.height) } ?? 0,
+                "globalX": x, "globalY": y,
+                "screenBacking": Double(scr?.backingScaleFactor ?? 0),
+                "screenFrameW": Double(scr?.frame.size.width ?? 0)
+            ]
+        )
+        // #endregion
+        // Let the window server / app actually front the window before injecting a click (text fields, terminal, web).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+            VibeFocusPaster.postLeftClickGlobal(point)
+            VibeStreamClickRipple.show(at: point)
         }
     }
 
@@ -282,11 +473,12 @@ final class VibeBridgeServer: ObservableObject {
         let maxW = Self.windowStreamMaxW
         let q = Self.windowStreamJPEGQ
         Task.detached(priority: .userInitiated) {
-            let (jpeg, err) = WindowStreamCapture.captureJPEG(bridgeWindowId: wid, maxWidth: maxW, quality: q)
+            let (jpeg, err, fullPx) = WindowStreamCapture.captureJPEG(bridgeWindowId: wid, maxWidth: maxW, quality: q)
             let b64: String? = jpeg.map { $0.base64EncodedString() }
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.windowStreamInFlight = false
+                if let s = fullPx { self.lastStreamFullPixelSize[wid] = s }
                 guard self.clientWantsWindowStream, !self.connections.isEmpty else { return }
                 self.windowStreamOutSeq &+= 1
                 let msg = BridgeWindowStreamMessage(

@@ -81,10 +81,31 @@ struct LayoutMirrorService {
         ref: CGRect,
         perScreen: [CGRect],
         windows: [ManagedWindow],
+        additionalWindows: [ManagedWindow] = [],
         selectedId: String?
     ) -> BridgeLayoutMessage? {
         guard !ref.isEmpty, ref.width > 0, ref.height > 0 else { return nil }
-        let layoutWins = Self.windowsInLayoutRef(windows, ref: ref)
+        let merged: [ManagedWindow] = {
+            if additionalWindows.isEmpty { return windows }
+            var ids = Set(windows.map(\.id))
+            var a = windows
+            for w in additionalWindows where !ids.contains(w.id) {
+                a.append(w)
+                ids.insert(w.id)
+            }
+            return a
+        }()
+        let layoutWins = Self.windowsInLayoutRef(merged, ref: ref)
+        // `windows[]` stays spatially sorted (stable tile / list order). `zIndex` must follow AX
+        // front-to-back so overlapping mirror tiles match real stacking for hit testing (iOS).
+        let layoutIds = Set(layoutWins.map(\.id))
+        let axFrontToBackInLayout: [ManagedWindow] = merged.filter { layoutIds.contains($0.id) }
+        let stackCount = axFrontToBackInLayout.count
+        var stackZById: [String: Int] = [:]
+        for (axPos, w) in axFrontToBackInLayout.enumerated() {
+            // `merged` is AX order (front first). Higher SwiftUI zIndex = closer to the user.
+            stackZById[w.id] = max(0, stackCount - 1 - axPos)
+        }
         var items: [BridgeWindow] = []
         items.reserveCapacity(layoutWins.count)
         for (i, w) in layoutWins.enumerated() {
@@ -93,7 +114,7 @@ struct LayoutMirrorService {
                 BridgeWindow(
                     id: w.id,
                     title: w.title,
-                    zIndex: i,
+                    zIndex: stackZById[w.id] ?? i,
                     rect: n
                 )
             )

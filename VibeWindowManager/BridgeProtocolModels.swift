@@ -29,6 +29,10 @@ enum BridgeMessageType: String, Codable {
     case setMirrorAppQuery
     case windowStream
     case setWindowStreamEnabled
+    case windowStreamClick
+    case openCalibrationTarget
+    case closeCalibrationTarget
+    case calibrationTarget
 }
 
 // MARK: - Outgoing (server)
@@ -111,6 +115,18 @@ struct BridgeWindowStreamMessage: Codable, Equatable {
     var error: String?
 }
 
+/// Server → client: tap targets for the white calibration window; user taps the dot in the live tile `sampleCount` times.
+struct BridgeCalibrationTargetMessage: Codable, Equatable {
+    var type: String = BridgeMessageType.calibrationTarget.rawValue
+    var windowId: String
+    /// Expected hit (0…1, top-left of bitmap) for the target dot, matching `windowStreamClick` convention.
+    var expectNx: Double
+    var expectNy: Double
+    var sampleCount: Int
+    /// 0…`sampleCount-1` — which of the random placements is currently shown; dot moves after each iPad sample.
+    var sampleIndex: Int
+}
+
 // MARK: - Incoming (client)
 
 struct BridgeClientHello: Codable {
@@ -172,6 +188,23 @@ struct BridgeSetWindowStreamEnabled: Codable {
     var enabled: Bool
 }
 
+/// Client → server: user tapped the live window JPEG. `nx`/`ny` are 0…1, **top-left** origin, within the
+/// captured image bitmap (see iOS: inverse of `scaleAspectFill` so clicks match pixels).
+struct BridgeWindowStreamClick: Codable {
+    var type: String = BridgeMessageType.windowStreamClick.rawValue
+    var windowId: String
+    var nx: Double
+    var ny: Double
+}
+
+struct BridgeClientOpenCalibration: Codable {
+    var type: String = BridgeMessageType.openCalibrationTarget.rawValue
+}
+
+struct BridgeClientCloseCalibration: Codable {
+    var type: String = BridgeMessageType.closeCalibrationTarget.rawValue
+}
+
 // MARK: - Decode helper
 
 enum BridgeJSONDecodeError: Error {
@@ -206,6 +239,12 @@ func decodeClientMessage(from string: String) throws -> Any {
         return try decoder.decode(BridgeSetMirrorAppQuery.self, from: data)
     case BridgeMessageType.setWindowStreamEnabled.rawValue:
         return try decoder.decode(BridgeSetWindowStreamEnabled.self, from: data)
+    case BridgeMessageType.windowStreamClick.rawValue:
+        return try decoder.decode(BridgeWindowStreamClick.self, from: data)
+    case BridgeMessageType.openCalibrationTarget.rawValue:
+        return try decoder.decode(BridgeClientOpenCalibration.self, from: data)
+    case BridgeMessageType.closeCalibrationTarget.rawValue:
+        return try decoder.decode(BridgeClientCloseCalibration.self, from: data)
     default:
         throw BridgeJSONDecodeError.unknownType(type)
     }

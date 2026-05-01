@@ -8,6 +8,11 @@
 import AppKit
 import Foundation
 
+enum VibeAppPersistence {
+    /// When true (default), the bridge starts at launch and the menu/GUI toggles default to on.
+    static let bridgeServerEnabledKey = "vibeBridgeServerEnabled"
+}
+
 enum WindowCLICommand: Equatable {
     case help
     case listApps
@@ -291,6 +296,76 @@ enum WindowCLI {
 
         print("Applied \(layout.rawValue) to \(windows.count) window\(windows.count == 1 ? "" : "s") of \(app.localizedName ?? appQuery).")
         return 0
+    }
+
+    // MARK: - Menu bar / shortcuts
+
+    /// Layout frame for an **external** display when at least two screens are attached; otherwise the main display’s layout frame.
+    @MainActor
+    static func layoutFrameForExtraOrMainScreen() -> CGRect? {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return nil }
+        let stage = StageManagerSupport.isEnabled
+        let target: NSScreen
+        if screens.count == 1 {
+            target = NSScreen.main ?? screens[0]
+        } else if let main = NSScreen.main,
+                  let external = screens.first(where: { $0 !== main }) {
+            target = external
+        } else {
+            target = screens[1]
+        }
+        return ScreenGeometry.layoutFrame(for: target, allScreens: screens, isStageManagerEnabled: stage)
+    }
+
+    /// Cascade every movable window of `appQuery` on the external display when possible, else on the main display. Returns an error message, or `nil` on success.
+    @discardableResult
+    @MainActor
+    static func applyCascadeForAppOnExtraOrMainScreen(
+        appQuery: String,
+        insetStep: CGFloat? = nil
+    ) -> String? {
+        let service = AXWindowLayoutService()
+        guard service.isProcessTrusted else {
+            return "Enable Accessibility for VibeWindowManager in System Settings."
+        }
+
+        let apps = runningApps()
+        guard let match = resolveApp(query: appQuery, in: apps) else {
+            return "Could not find a running app matching “\(appQuery)”."
+        }
+
+        if match.ambiguous {
+            let names = match.candidates.map { $0.localizedName ?? ($0.bundleIdentifier ?? "Unknown") }.joined(separator: ", ")
+            return "“\(appQuery)” is ambiguous. Matches: \(names)"
+        }
+
+        guard let app = match.app else {
+            return "Could not resolve app “\(appQuery)”."
+        }
+
+        let windows = (try? service.windows(for: app)) ?? []
+        guard !windows.isEmpty else {
+            return "No movable windows found for \(app.localizedName ?? appQuery)."
+        }
+
+        guard let visibleFrame = layoutFrameForExtraOrMainScreen() else {
+            return "No usable display found."
+        }
+
+        let screens = NSScreen.screens
+        do {
+            try service.applyCascade(
+                visibleFrame: visibleFrame,
+                to: windows.map(\.element),
+                allScreens: screens,
+                insetStep: insetStep ?? CascadeDefaults.insetStep
+            )
+        } catch {
+            return error.localizedDescription
+        }
+
+        return nil
     }
 
     // MARK: - Matching

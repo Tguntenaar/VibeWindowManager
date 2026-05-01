@@ -7,6 +7,7 @@
 
 import AppKit
 import ApplicationServices
+import CoreGraphics
 import Foundation
 
 @MainActor
@@ -22,6 +23,39 @@ enum VibeFocusPaster {
         let e = window.element
         let err = AXUIElementPerformAction(e, kAXRaiseAction as CFString)
         if err != .success { throw LayoutError.cannotSetFrame }
+    }
+
+    /// `point` in AppKit global space (y increases upward), matching `NSEvent.mouseLocation` / `CGEvent`.
+    static func postLeftClickGlobal(_ point: CGPoint) {
+        let src = CGEventSource(stateID: .hidSystemState)
+        // Nudge the OS “cursor” to the point first — some apps (web views, text fields) only update
+        // hit-testing after a move, and ignore a bare down+up at a stale position.
+        if let move = CGEvent(
+            mouseEventSource: src,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        ) {
+            move.post(tap: .cghidEventTap)
+        }
+        if let d = CGEvent(
+            mouseEventSource: src,
+            mouseType: .leftMouseDown,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        ) {
+            d.setIntegerValueField(.mouseEventClickState, value: 1)
+            d.post(tap: .cghidEventTap)
+        }
+        if let d = CGEvent(
+            mouseEventSource: src,
+            mouseType: .leftMouseUp,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        ) {
+            d.setIntegerValueField(.mouseEventClickState, value: 1)
+            d.post(tap: .cghidEventTap)
+        }
     }
 
     /// Puts `text` on the pasteboard, then (after the next run-loop turn) posts Cmd+V as real key-down / key-up

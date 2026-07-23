@@ -12,6 +12,7 @@ struct MediaTabView: View {
     @AppStorage("vibeMediaKeysEnabled") private var mediaKeysEnabled: Bool = false
     @AppStorage("vibeMusicRedirectEnabled") private var musicRedirectEnabled: Bool = false
     @AppStorage("vibeAirPodsCaptureEnabled") private var airPodsCaptureEnabled: Bool = false
+    @AppStorage("vibeF5NoiseToggleEnabled") private var f5NoiseToggleEnabled: Bool = false
 
     var body: some View {
         ScrollView {
@@ -72,6 +73,19 @@ struct MediaTabView: View {
 
                     Divider()
 
+                    Toggle(isOn: $f5NoiseToggleEnabled) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("F5 toggles Noise Cancellation ↔ Transparency")
+                                .font(.subheadline.weight(.medium))
+                            Text("While AirPods are the active output, F5 switches between Noise Cancellation and Transparency (via Control Center). Without AirPods, F5 behaves normally.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+
+                    Divider()
+
                     Toggle(isOn: $media.launchAtLogin) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Open at login")
@@ -95,6 +109,11 @@ struct MediaTabView: View {
                     statusRow(ok: media.spotifyRunning, on: "Spotify is running", off: "Spotify is not running")
                     if media.airPodsCaptureActive {
                         statusRow(ok: media.decoyHoldsNowPlaying, on: "Holding Now Playing slot (AirPods clicks come here)", off: "Now Playing slot released (Spotify owns routing)")
+                    }
+                    if media.f5NoiseToggleActive, let mode = media.lastNoiseMode {
+                        Text("Last F5 toggle: \(mode)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     if media.musicRedirectCount > 0 {
                         Text("Blocked Apple Music \(media.musicRedirectCount)× this session")
@@ -126,9 +145,13 @@ struct MediaTabView: View {
             media.setMediaKeysEnabled(mediaKeysEnabled)
             media.setMusicInterceptionEnabled(musicRedirectEnabled)
             media.setAirPodsCaptureEnabled(airPodsCaptureEnabled)
+            media.setF5NoiseToggleEnabled(f5NoiseToggleEnabled)
         }
         .onChange(of: mediaKeysEnabled) { _, enabled in
             media.setMediaKeysEnabled(enabled)
+        }
+        .onChange(of: f5NoiseToggleEnabled) { _, enabled in
+            media.setF5NoiseToggleEnabled(enabled)
         }
         .onChange(of: musicRedirectEnabled) { _, enabled in
             media.setMusicInterceptionEnabled(enabled)

@@ -35,6 +35,7 @@ struct ContentView: View {
     @AppStorage("vibeMediaKeysEnabled") private var mediaKeysEnabled: Bool = false
     @AppStorage("vibeMusicRedirectEnabled") private var musicRedirectEnabled: Bool = false
     @AppStorage("vibeAirPodsCaptureEnabled") private var airPodsCaptureEnabled: Bool = false
+    @AppStorage("vibeF5NoiseToggleEnabled") private var f5NoiseToggleEnabled: Bool = false
     @State private var service = AXWindowLayoutService()
     @State private var runningApps: [AppChoice] = []
     @State private var windows: [ManagedWindow] = []
@@ -90,6 +91,7 @@ struct ContentView: View {
             media.setMediaKeysEnabled(mediaKeysEnabled)
             media.setMusicInterceptionEnabled(musicRedirectEnabled)
             media.setAirPodsCaptureEnabled(airPodsCaptureEnabled)
+            media.setF5NoiseToggleEnabled(f5NoiseToggleEnabled)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             service = AXWindowLayoutService()

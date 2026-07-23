@@ -9,6 +9,7 @@
 import AppKit
 import ApplicationServices
 import Combine
+import CoreAudio
 import MediaPlayer
 import ServiceManagement
 
@@ -35,6 +36,8 @@ final class MediaControlService: ObservableObject {
     @Published private(set) var lastAction: String?
     @Published private(set) var airPodsCaptureActive = false
     @Published private(set) var decoyHoldsNowPlaying = false
+    @Published private(set) var f5NoiseToggleActive = false
+    @Published private(set) var lastNoiseMode: String?
     @Published var launchAtLogin: Bool = (SMAppService.mainApp.status == .enabled) {
         didSet { applyLaunchAtLogin() }
     }
@@ -43,6 +46,9 @@ final class MediaControlService: ObservableObject {
     private var runLoopSource: CFRunLoopSource?
     private var workspaceObservers: [NSObjectProtocol] = []
     private let scriptQueue = DispatchQueue(label: "vibe.media.osascript")
+    private var mediaKeysWanted = false
+    private var f5ToggleWanted = false
+    private var noiseToggleBusy = false
 
     init() {
         refreshSpotifyRunning()
@@ -66,7 +72,20 @@ final class MediaControlService: ObservableObject {
     // MARK: - Media key forwarding (event tap)
 
     func setMediaKeysEnabled(_ enabled: Bool) {
-        enabled ? startMediaKeyTap() : stopMediaKeyTap()
+        mediaKeysWanted = enabled
+        rebuildTap()
+    }
+
+    func setF5NoiseToggleEnabled(_ enabled: Bool) {
+        f5ToggleWanted = enabled
+        f5NoiseToggleActive = enabled
+        rebuildTap()
+    }
+
+    private func rebuildTap() {
+        stopMediaKeyTap()
+        if mediaKeysWanted || f5ToggleWanted { startMediaKeyTap() }
+        mediaKeyTapActive = mediaKeysWanted && eventTap != nil
     }
 
     private func startMediaKeyTap() {
@@ -80,7 +99,10 @@ final class MediaControlService: ObservableObject {
         }
 
         // NX_SYSDEFINED == 14; media keys arrive as system-defined events.
-        let mask = CGEventMask(1 << 14)
+        // Plain key-downs are only tapped when the F5 noise toggle wants them.
+        var mask: CGEventMask = 0
+        if mediaKeysWanted { mask |= CGEventMask(1 << 14) }
+        if f5ToggleWanted { mask |= CGEventMask(1 << CGEventType.keyDown.rawValue) }
         eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -92,6 +114,7 @@ final class MediaControlService: ObservableObject {
 
         guard let eventTap else {
             mediaKeyTapActive = false
+            f5NoiseToggleActive = false
             lastAction = "Could not create event tap — grant Accessibility permission and retry."
             return
         }
@@ -99,7 +122,6 @@ final class MediaControlService: ObservableObject {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: eventTap, enable: true)
-        mediaKeyTapActive = true
     }
 
     private func stopMediaKeyTap() {
@@ -120,6 +142,19 @@ final class MediaControlService: ObservableObject {
                 if let tap = self.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             }
             return Unmanaged.passUnretained(cgEvent)
+        }
+
+        if type == .keyDown {
+            // Key-downs are only in the tap mask when the F5 noise toggle is on.
+            guard cgEvent.getIntegerValueField(.keyboardEventKeycode) == 96, // F5
+                  Self.defaultOutputIsAirPodsLike()
+            else {
+                return Unmanaged.passUnretained(cgEvent)
+            }
+            if cgEvent.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                Task { @MainActor in self.toggleAirPodsNoiseMode() }
+            }
+            return nil
         }
 
         guard type.rawValue == 14, // NX_SYSDEFINED
@@ -275,6 +310,178 @@ final class MediaControlService: ObservableObject {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         decoyHoldsNowPlaying = false
     }
+
+    // MARK: - F5 → AirPods noise mode toggle
+    //
+    // There is no public API for AirPods listening modes, so this UI-scripts
+    // the Control Center Sound pane (works with the Sound menu icon hidden).
+    // The event tap only swallows F5 while AirPods are the default output.
+
+    private nonisolated static func defaultOutputIsAirPodsLike() -> Bool {
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID) == noErr,
+              deviceID != kAudioObjectUnknown
+        else { return false }
+
+        var transport = UInt32(0)
+        size = UInt32(MemoryLayout<UInt32>.size)
+        address.mSelector = kAudioDevicePropertyTransportType
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &transport) == noErr,
+              transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+        else { return false }
+
+        var name: Unmanaged<CFString>?
+        size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        address.mSelector = kAudioObjectPropertyName
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &name) == noErr,
+              let cfName = name?.takeRetainedValue()
+        else { return false }
+        return (cfName as String).localizedCaseInsensitiveContains("AirPods")
+    }
+
+    func toggleAirPodsNoiseMode() {
+        guard !noiseToggleBusy else { return }
+        noiseToggleBusy = true
+        lastAction = "F5 — toggling AirPods noise mode…"
+        scriptQueue.async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", Self.noiseToggleScript]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            var result = "script-failed"
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                result = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "script-failed"
+                if result.isEmpty { result = "script-failed" }
+            } catch {
+                result = "script-failed"
+            }
+            Task { @MainActor in
+                guard let self else { return }
+                self.noiseToggleBusy = false
+                self.lastNoiseMode = result
+                self.lastAction = "AirPods noise mode → \(result)"
+            }
+        }
+    }
+
+    private nonisolated static let noiseToggleScript = """
+    tell application "System Events"
+        tell application process "ControlCenter"
+            set panelOpen to false
+            repeat with mbi in menu bar items of menu bar 1
+                try
+                    if (value of attribute "AXIdentifier" of mbi) is "com.apple.menuextra.controlcenter" then
+                        click mbi
+                        set panelOpen to true
+                        exit repeat
+                    end if
+                end try
+            end repeat
+            if not panelOpen then return "no-control-center"
+            repeat 10 times
+                delay 0.12
+                if (count of windows) > 0 then exit repeat
+            end repeat
+            if (count of windows) is 0 then return "no-panel"
+            set volBtn to missing value
+            try
+                repeat with e in UI elements of group 1 of window 1
+                    try
+                        if (value of attribute "AXIdentifier" of e) is "controlcenter-volume" then
+                            set volBtn to e
+                            exit repeat
+                        end if
+                    end try
+                end repeat
+            end try
+            if volBtn is missing value then
+                key code 53
+                return "no-volume-button"
+            end if
+            click volBtn
+            delay 0.35
+            set sa to missing value
+            try
+                set sa to scroll area 1 of group 1 of window 1
+            end try
+            if sa is missing value then
+                key code 53
+                return "no-sound-pane"
+            end if
+            set kids to UI elements of sa
+            set devID to ""
+            set triIndex to -1
+            repeat with i from 1 to count of kids
+                set e to item i of kids
+                try
+                    if (role of e) is "AXDisclosureTriangle" then
+                        set candID to (value of attribute "AXIdentifier" of e) as string
+                        if i < (count of kids) then
+                            set cb to item (i + 1) of kids
+                            if (role of cb) is "AXCheckBox" and ((value of attribute "AXIdentifier" of cb) as string) is candID then
+                                if ((value of cb) as integer) is 1 then
+                                    set devID to candID
+                                    set triIndex to i
+                                    if ((value of e) as integer) is 0 then
+                                        click e
+                                        delay 0.3
+                                    end if
+                                    exit repeat
+                                end if
+                            end if
+                        end if
+                    end if
+                end try
+            end repeat
+            if triIndex < 1 then
+                key code 53
+                return "no-active-headphones"
+            end if
+            set kids to UI elements of sa
+            set modeIdxs to {}
+            set seenDevice to false
+            repeat with i from 1 to count of kids
+                set e to item i of kids
+                try
+                    if ((value of attribute "AXIdentifier" of e) as string) is devID and (role of e) is "AXCheckBox" then
+                        if seenDevice then
+                            if (count of modeIdxs) < 3 then set end of modeIdxs to i
+                        else
+                            set seenDevice to true
+                        end if
+                    end if
+                end try
+            end repeat
+            if (count of modeIdxs) < 3 then
+                key code 53
+                return "no-noise-modes"
+            end if
+            set trBox to item (item 1 of modeIdxs) of kids
+            set ncBox to item (item 3 of modeIdxs) of kids
+            if ((value of ncBox) as integer) is 1 then
+                click trBox
+                set outMode to "Transparency"
+            else
+                click ncBox
+                set outMode to "Noise Cancellation"
+            end if
+            delay 0.15
+            key code 53
+            return outMode
+        end tell
+    end tell
+    """
 
     // MARK: - Launch at login
 

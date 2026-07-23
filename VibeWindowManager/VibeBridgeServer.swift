@@ -19,6 +19,17 @@ final class VibeBridgeServer: ObservableObject {
     @Published var isRunning = false
     @Published var port: UInt16 = 0
     @Published var lastError: String?
+    /// Live loudness (0…1) of the continuous mic passthrough received from the iOS app, for the "Mic" tab meter.
+    @Published var passthroughLevel: Float = 0
+    /// True while the phone is actively streaming `audioPassthrough` chunks.
+    @Published var passthroughActive: Bool = false
+
+    /// Optional sink for raw passthrough PCM (s16le mono 16 kHz). A future local model can subscribe here;
+    /// today nothing consumes it. Set on the main actor.
+    var passthroughAudioSink: ((Data) -> Void)?
+    /// Watchdog that decays `passthroughLevel` to zero when chunks stop arriving (e.g. Wi-Fi drop).
+    private var passthroughWatchdog: Timer?
+    private var lastPassthroughChunkAt: Date?
     @Published var serviceName: String = Host.current().localizedName ?? "VibeWindowManager"
     /// App query (e.g. `ghostty`) for listing windows.
     @Published var appQuery: String = "ghostty"
@@ -293,6 +304,8 @@ final class VibeBridgeServer: ObservableObject {
             if let m = try? decoder.decode(BridgeTranscribeLive.self, from: data) {
                 runTranscribeLive(m.text)
             }
+        case BridgeMessageType.audioPassthrough.rawValue:
+            runAudioPassthrough(data: data)
         case BridgeMessageType.setWindowRect.rawValue:
             do {
                 let msg = try decoder.decode(BridgeSetWindowRect.self, from: data)
@@ -822,5 +835,74 @@ final class VibeBridgeServer: ObservableObject {
         } catch {
             sendToAllConnections(BridgeTranscribeResult(text: "", error: error.localizedDescription))
         }
+    }
+
+    // MARK: - Continuous mic passthrough (no STT)
+
+    /// Handles `audioPassthrough` chunks: meters the level for the Mic tab and forwards PCM to the
+    /// optional sink. Never runs Whisper, never types. `active: false` stops metering.
+    private func runAudioPassthrough(data: Data) {
+        guard let msg = try? decoder.decode(BridgeAudioPassthrough.self, from: data) else { return }
+        if !msg.active {
+            stopPassthroughMetering()
+            return
+        }
+        guard !msg.base64.isEmpty, let pcm = Data(base64Encoded: msg.base64), !pcm.isEmpty else { return }
+
+        passthroughAudioSink?(pcm)
+
+        let level = Self.rmsLevel(fromPCMS16le: pcm)
+        // Light smoothing so the bar reads steady but still tracks speech peaks.
+        passthroughLevel = passthroughLevel * 0.6 + level * 0.4
+        passthroughActive = true
+        lastPassthroughChunkAt = Date()
+        ensurePassthroughWatchdog()
+    }
+
+    /// RMS over 16-bit LE mono samples mapped to 0…1 via a -50 dBFS…0 dBFS window (speech reads mid-range).
+    private static func rmsLevel(fromPCMS16le data: Data) -> Float {
+        let count = data.count / 2
+        if count == 0 { return 0 }
+        var sumSquares = 0.0
+        data.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<count {
+                let v = Double(p[i]) / 32768.0
+                sumSquares += v * v
+            }
+        }
+        let rms = (sumSquares / Double(count)).squareRoot()
+        let db = 20 * log10(max(rms, 1e-7))
+        let norm = (db + 50) / 50
+        return Float(min(max(norm, 0), 1))
+    }
+
+    private func ensurePassthroughWatchdog() {
+        guard passthroughWatchdog == nil else { return }
+        passthroughWatchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.passthroughWatchdogTick() }
+        }
+    }
+
+    private func passthroughWatchdogTick() {
+        let silentFor = lastPassthroughChunkAt.map { Date().timeIntervalSince($0) } ?? .greatestFiniteMagnitude
+        if silentFor > 0.25 {
+            // No fresh chunks: decay toward zero so the bar falls during pauses / after a drop.
+            passthroughLevel *= 0.7
+            if passthroughLevel < 0.01 {
+                passthroughLevel = 0
+                if silentFor > 1.0 {
+                    stopPassthroughMetering()
+                }
+            }
+        }
+    }
+
+    private func stopPassthroughMetering() {
+        passthroughWatchdog?.invalidate()
+        passthroughWatchdog = nil
+        lastPassthroughChunkAt = nil
+        passthroughActive = false
+        passthroughLevel = 0
     }
 }

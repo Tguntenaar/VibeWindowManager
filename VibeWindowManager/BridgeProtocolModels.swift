@@ -21,6 +21,7 @@ enum BridgeMessageType: String, Codable {
     case transcribe
     case transcribeLive
     case transcribeResult
+    case audioPassthrough
     case error
     case setWindowRect
     case requestTmuxPane
@@ -173,6 +174,15 @@ struct BridgeTranscribeLive: Codable {
     var text: String
 }
 
+/// Continuous mic passthrough chunk (PCM s16le mono 16 kHz, base64). Never runs Whisper; the server
+/// only meters the level and forwards PCM to an optional sink. `active: false` means the stream stopped.
+struct BridgeAudioPassthrough: Codable {
+    var type: String
+    var format: String
+    var base64: String
+    var active: Bool
+}
+
 struct BridgeRequestTmuxPane: Codable {
     var type: String
     var lines: Int?
@@ -231,6 +241,8 @@ func decodeClientMessage(from string: String) throws -> Any {
         return try decoder.decode(BridgeTranscribe.self, from: data)
     case BridgeMessageType.transcribeLive.rawValue:
         return try decoder.decode(BridgeTranscribeLive.self, from: data)
+    case BridgeMessageType.audioPassthrough.rawValue:
+        return try decoder.decode(BridgeAudioPassthrough.self, from: data)
     case BridgeMessageType.setWindowRect.rawValue:
         return try decoder.decode(BridgeSetWindowRect.self, from: data)
     case BridgeMessageType.requestTmuxPane.rawValue:

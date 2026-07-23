@@ -143,6 +143,26 @@ When the utterance **ends** (`transcribe` with `end: true`), the server runs the
 
 If STT is not installed, `error` is set and `text` is empty.
 
+### `audioPassthrough` (client → server)
+
+**Continuous mic passthrough**, independent of `transcribe`/STT. The client streams raw PCM (16-bit little-endian mono, 16 kHz, same `pcm_s16le_16000` format as `transcribe`) as base64 chunks while a Parsec-style passthrough toggle is on. Unlike `transcribe`, this **never** runs Whisper and **never** pastes/types — the server only computes a loudness level for the Mac "Mic" tab meter and forwards the PCM to an optional sink (a future local model can subscribe to it).
+
+`active` marks stream state: `true` for live chunks, `false` to signal the stream stopped (server zeroes the meter). There is no `end` flag and no response message.
+
+**Chunk:**
+
+```json
+{ "type": "audioPassthrough", "format": "pcm_s16le_16000", "base64": "...", "active": true }
+```
+
+**Stop:**
+
+```json
+{ "type": "audioPassthrough", "format": "pcm_s16le_16000", "base64": "", "active": false }
+```
+
+There is no server → client reply; the Mac reflects the received level locally in its UI.
+
 ### `error` (server → client)
 
 ```json

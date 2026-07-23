@@ -404,6 +404,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Window Manager";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "VibeWindowManager controls Spotify (play/pause, next, previous) when you press media keys or your AirPods.";
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "VibeWindowManager needs Accessibility to move and resize other apps’ windows (tile, cascade).";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "VibeWindowManager needs Screen Recording to send live per-window screen previews to the iPad. Allow it for this app in System Settings if prompted.";
@@ -439,6 +440,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Window Manager";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "VibeWindowManager controls Spotify (play/pause, next, previous) when you press media keys or your AirPods.";
 				INFOPLIST_KEY_NSAccessibilityUsageDescription = "VibeWindowManager needs Accessibility to move and resize other apps’ windows (tile, cascade).";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "VibeWindowManager needs Screen Recording to send live per-window screen previews to the iPad. Allow it for this app in System Settings if prompted.";

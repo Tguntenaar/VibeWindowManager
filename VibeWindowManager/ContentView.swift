@@ -11,6 +11,7 @@ import SwiftUI
 private enum MainTab: Hashable {
     case layout
     case bridge
+    case media
     case away
 }
 
@@ -30,6 +31,10 @@ enum LayoutProposal: Hashable {
 
 struct ContentView: View {
     @StateObject private var bridge = VibeBridgeServer()
+    @StateObject private var media = MediaControlService()
+    @AppStorage("vibeMediaKeysEnabled") private var mediaKeysEnabled: Bool = false
+    @AppStorage("vibeMusicRedirectEnabled") private var musicRedirectEnabled: Bool = false
+    @AppStorage("vibeAirPodsCaptureEnabled") private var airPodsCaptureEnabled: Bool = false
     @State private var service = AXWindowLayoutService()
     @State private var runningApps: [AppChoice] = []
     @State private var windows: [ManagedWindow] = []
@@ -58,6 +63,9 @@ struct ContentView: View {
             bridgeTab
                 .tag(MainTab.bridge)
                 .tabItem { Label("iOS bridge", systemImage: "antenna.radiowaves.left.and.right") }
+            mediaTab
+                .tag(MainTab.media)
+                .tabItem { Label("Media", systemImage: "playpause") }
             awayTab
                 .tag(MainTab.away)
                 .tabItem { Label("Away", systemImage: "display.2") }
@@ -79,6 +87,9 @@ struct ContentView: View {
             if !bridge.isRunning {
                 bridge.start()
             }
+            media.setMediaKeysEnabled(mediaKeysEnabled)
+            media.setMusicInterceptionEnabled(musicRedirectEnabled)
+            media.setAirPodsCaptureEnabled(airPodsCaptureEnabled)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             service = AXWindowLayoutService()
@@ -480,6 +491,11 @@ struct ContentView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    @ViewBuilder
+    private var mediaTab: some View {
+        MediaTabView(media: media)
     }
 
     @ViewBuilder

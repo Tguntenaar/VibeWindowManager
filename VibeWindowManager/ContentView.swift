@@ -12,6 +12,7 @@ private enum MainTab: Hashable {
     case layout
     case bridge
     case media
+    case servers
     case away
 }
 
@@ -67,6 +68,9 @@ struct ContentView: View {
             mediaTab
                 .tag(MainTab.media)
                 .tabItem { Label("Media", systemImage: "playpause") }
+            serversTab
+                .tag(MainTab.servers)
+                .tabItem { Label("Servers", systemImage: "server.rack") }
             awayTab
                 .tag(MainTab.away)
                 .tabItem { Label("Away", systemImage: "display.2") }
@@ -498,6 +502,11 @@ struct ContentView: View {
     @ViewBuilder
     private var mediaTab: some View {
         MediaTabView(media: media)
+    }
+
+    @ViewBuilder
+    private var serversTab: some View {
+        ServersTabView(scanner: LocalServerScanService.shared)
     }
 
     @ViewBuilder

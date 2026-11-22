@@ -10,6 +10,15 @@ actor CursorCredentials {
     private var pending: Task<String?, Never>?
     private var pendingID: UUID?
     private var safeStoragePassword: Data?
+    private let databasePath: String
+    private let readPassword: @Sendable (Bool) async -> Data?
+
+    /// Tests inject a scratch database and a password reader; the app uses Cursor's own store.
+    init(databasePath: String = CursorCredentials.databasePath,
+         readPassword: @escaping @Sendable (Bool) async -> Data? = { await CursorCredentials.readSafeStoragePassword(allowInteraction: $0) }) {
+        self.databasePath = databasePath
+        self.readPassword = readPassword
+    }
 
     func accessToken(allowInteraction: Bool = false) async -> String? {
         if let pending {
@@ -32,7 +41,7 @@ actor CursorCredentials {
         .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage/state.vscdb").path
 
     private func load(allowInteraction: Bool) async -> String? {
-        let path = Self.databasePath
+        let path = databasePath
         guard let desktop = CursorUsageEngine.accessToken(databasePath: path), !desktop.isEmpty else { return nil }
         if !desktop.hasPrefix(CursorDesktopToken.prefix) { return desktop }
         if let token = await desktopSession(desktop, allowInteraction: allowInteraction) { return token }
@@ -54,7 +63,7 @@ actor CursorCredentials {
 
     /// The desktop session wins. A stale in-memory storage password is dropped and read once more.
     private func desktopSession(_ stored: String, allowInteraction: Bool) async -> String? {
-        let account = CursorUsageEngine.databaseValue("cursorAuth/stripeMembershipAuthId", databasePath: Self.databasePath)
+        let account = CursorUsageEngine.databaseValue("cursorAuth/stripeMembershipAuthId", databasePath: databasePath)
         let now = Date()
         if let safeStoragePassword,
            let token = CursorDesktopToken.plaintext(stored: stored, password: safeStoragePassword),
@@ -62,14 +71,14 @@ actor CursorCredentials {
             return token
         }
         safeStoragePassword = nil
-        guard let password = await Self.readSafeStoragePassword(allowInteraction: allowInteraction),
+        guard let password = await readPassword(allowInteraction),
               let token = CursorDesktopToken.plaintext(stored: stored, password: password),
               Self.usableDesktopToken(token, account: account, now: now) else { return nil }
         safeStoragePassword = password
         return token
     }
 
-    private static func readSafeStoragePassword(allowInteraction: Bool) async -> Data? {
+    static func readSafeStoragePassword(allowInteraction: Bool) async -> Data? {
         let state = ClaudeKeychain.access(service: CursorDesktopToken.safeStorageService)
         let blocked = UserDefaults.standard.bool(forKey: safeStorageBlockedKey)
         guard canReadSafeStorage(state, allowInteraction: allowInteraction, blocked: blocked) else { return nil }

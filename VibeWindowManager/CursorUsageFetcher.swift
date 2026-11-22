@@ -6,7 +6,16 @@ import SQLite3
 /// Cursor owns login and token refresh. Never logs or copies credentials to disk.
 struct CursorUsageFetcher: UsageFetching {
     func fetch() async -> ProviderUsage {
-        let snapshot = await CursorUsageEngine.fetch()
+        let snapshot = await CursorUsageEngine.fetch(
+            tokenLookup: { await CursorCredentials.shared.accessToken() },
+            tokenError: {
+                let stored = CursorUsageEngine.accessToken(databasePath: CursorCredentials.databasePath)
+                let access = ClaudeKeychain.access(service: CursorDesktopToken.safeStorageService)
+                let blocked = UserDefaults.standard.bool(forKey: CursorCredentials.safeStorageBlockedKey)
+                return CursorCredentials.loginFailureMessage(storedToken: stored, safeStorage: access,
+                                                             safeStorageBlocked: blocked)
+            }
+        )
         return ProviderUsage(provider: .cursor, planName: snapshot.planName,
             windows: snapshot.windows.map {
                 UsageWindow(label: $0.label, usedPercent: $0.percent, resetsAt: $0.reset)
@@ -31,13 +40,15 @@ nonisolated enum CursorUsageEngine {
 
     @concurrent static func fetch(
         tokenLookup: @Sendable () async -> String? = { await CursorCredentials.shared.accessToken() },
+        tokenError: @Sendable () async -> String? = { nil },
         transport: @escaping Transport = { try await CursorDashboardClient.shared.data(for: $0) }
     ) async -> Snapshot {
         guard !Task.isCancelled else {
             return Snapshot(error: "Cursor usage refresh was cancelled.")
         }
         guard let token = await tokenLookup(), !token.isEmpty else {
-            return Snapshot(error: "Cursor usage needs a readable login. Sign in to Cursor Agent (the CLI), then choose Reconnect Cursor here. Opening the desktop app alone does not connect usage.")
+            let fallback = "Cursor usage needs a readable login. Sign in to Cursor Agent (the CLI), then choose Reconnect Cursor here. Opening the desktop app alone does not connect usage."
+            return Snapshot(error: await tokenError() ?? fallback)
         }
         guard !token.hasPrefix("cursor-safe-storage:") else {
             return Snapshot(error: "Cursor’s saved login is encrypted. Sign in to Cursor Agent to connect usage.")

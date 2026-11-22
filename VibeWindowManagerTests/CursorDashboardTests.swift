@@ -1,3 +1,4 @@
+import CommonCrypto
 import Foundation
 import Testing
 @testable import VibeWindowManager
@@ -97,6 +98,62 @@ struct CursorDashboardTests {
         _ = try await restarted.data(for: request("GetPlanInfo"))
         #expect(await calls.count == 2)
         #expect((defaults.object(forKey: CursorDashboardClient.cooldownKey) as? Date)?.timeIntervalSince(clock.now()) == 1800)
+    }
+
+    @Test func encryptedDesktopSessionDecryptsWithTheSafeStoragePassword() throws {
+        let jwt = try jwt(subject: "github|user", expires: 2_000)
+        let stored = try seal(jwt, password: "cursor-safe-storage-password")
+        let token = CursorDesktopToken.plaintext(stored: stored, password: Data("cursor-safe-storage-password".utf8))
+        #expect(token == jwt)
+        #expect(CursorDesktopToken.plaintext(stored: stored, password: Data("wrong-password".utf8)) == nil)
+        #expect(CursorDesktopToken.plaintext(stored: "plain-token", password: Data("cursor-safe-storage-password".utf8)) == nil)
+        let now = Date(timeIntervalSince1970: 1_000)
+        #expect(CursorCredentials.usableDesktopToken(jwt, account: "github|user", now: now))
+        #expect(!CursorCredentials.usableDesktopToken(jwt, account: "other-account", now: now))
+        #expect(!CursorCredentials.usableDesktopToken(try self.jwt(subject: "github|user", expires: 1_050), account: "github|user", now: now))
+    }
+
+    @Test func encryptedLoginTellsTheUserToReconnectInsteadOfTheCLI() {
+        let stored = "cursor-safe-storage:v1:ciphertext"
+        let message = CursorCredentials.loginFailureMessage(storedToken: stored, safeStorage: .approvalRequired, safeStorageBlocked: false)
+        #expect(message == "Cursor’s sign-in is encrypted. Choose Reconnect Cursor to allow Keychain access.")
+        #expect(CursorCredentials.loginFailureMessage(storedToken: stored, safeStorage: .ready("Cursor"), safeStorageBlocked: true) == message)
+        #expect(CursorCredentials.loginFailureMessage(storedToken: nil, safeStorage: .missing, safeStorageBlocked: false).contains("Cursor Agent"))
+        #expect(!CursorCredentials.canReadSafeStorage(.approvalRequired, allowInteraction: false, blocked: false))
+        #expect(CursorCredentials.canReadSafeStorage(.approvalRequired, allowInteraction: true, blocked: true))
+        #expect(CursorCredentials.canReadSafeStorage(.ready("Cursor"), allowInteraction: false, blocked: false))
+        #expect(!CursorCredentials.canReadSafeStorage(.ready("Cursor"), allowInteraction: false, blocked: true))
+        #expect(!CursorCredentials.canReadSafeStorage(.missing, allowInteraction: true, blocked: false))
+    }
+
+    @Test func tokenErrorReplacesTheCLIMessageWhenSupplied() async {
+        let result = await CursorUsageEngine.fetch(tokenLookup: { nil }, tokenError: {
+            "Cursor’s sign-in is encrypted. Choose Reconnect Cursor to allow Keychain access."
+        }) { _ in
+            Issue.record("A missing credential must not trigger a network request")
+            throw URLError(.badURL)
+        }
+        #expect(result.error == "Cursor’s sign-in is encrypted. Choose Reconnect Cursor to allow Keychain access.")
+    }
+
+    private func jwt(subject: String, expires: Double) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: ["sub": subject, "exp": expires])
+        let payload = data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        return "eyJhbGciOiJub25lIn0." + payload + ".sig"
+    }
+
+    private func seal(_ plaintext: String, password: String) throws -> String {
+        let key = try #require(ClaudeDesktopSession.derivedKey(Data(password.utf8)))
+        let plain = Array(plaintext.utf8)
+        let iv = [UInt8](repeating: 0x20, count: kCCBlockSizeAES128)
+        var output = [UInt8](repeating: 0, count: plain.count + kCCBlockSizeAES128)
+        var moved = 0
+        let status = CCCrypt(CCOperation(kCCEncrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding),
+                             key, key.count, iv, plain, plain.count, &output, output.count, &moved)
+        #expect(status == kCCSuccess)
+        var blob = Data("v10".utf8)
+        blob.append(contentsOf: output.prefix(moved))
+        return CursorDesktopToken.prefix + blob.base64EncodedString()
     }
 
     @Test func networkFailuresAreAlsoThrottled() async {
